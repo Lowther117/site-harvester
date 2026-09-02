@@ -1,0 +1,7 @@
+# Optional: the lower-fidelity PDF fallback, used only if the headless browser
+# cannot start. Needs Pango system libraries as well as this package:
+#   macOS    brew install pango
+#   Linux    sudo apt install libpango-1.0-0 libpangoft2-1.0-0
+#   Windows  install MSYS2, then in its shell:
+#            pacman -S mingw-w64-x86_64-pango
+weasyprint>=61.0

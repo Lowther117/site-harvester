@@ -49,9 +49,9 @@ if ! python3 -c "import tkinter" >/dev/null 2>&1; then
 fi
 echo
 
-# --- 1c. Install system tools: pango (PDF) + ffmpeg (best-quality video) -----
+# --- 1c. Install system tools: ffmpeg (best-quality / embedded video) --------
 if command -v brew >/dev/null 2>&1; then
-  for tool in pango ffmpeg; do
+  for tool in ffmpeg; do
     if ! brew list "$tool" >/dev/null 2>&1; then
       echo "Installing '$tool'…"
       brew install "$tool" || echo "Warning: could not install $tool."
@@ -60,11 +60,10 @@ if command -v brew >/dev/null 2>&1; then
     fi
   done
 else
-  echo "Note: Homebrew not found. Downloading files will still work, but:"
-  echo "      - saving pages as PDF needs 'pango'"
-  echo "      - best-quality/embedded video needs 'ffmpeg'"
+  echo "Note: Homebrew not found. Everything still works except that"
+  echo "      best-quality/embedded video needs 'ffmpeg'."
   echo "      Install Homebrew from https://brew.sh then run:"
-  echo "        brew install pango ffmpeg"
+  echo "        brew install ffmpeg"
 fi
 echo
 
@@ -99,12 +98,19 @@ echo
 
 # --- 4. Build the .app ------------------------------------------------------
 echo "Building the app (this can take a minute or two)…"
+# WeasyPrint is an optional fallback (requirements-fallback.txt). Only ask
+# PyInstaller to bundle it if it is actually installed, or the build fails.
+WEASY_FLAG=""
+if "$VPY" -c "import weasyprint" >/dev/null 2>&1; then
+  WEASY_FLAG="--collect-all weasyprint"
+fi
+
 "$VPY" -m PyInstaller \
   --name "Site Harvester" \
   --windowed \
   --noconfirm \
   --clean \
-  --collect-all weasyprint \
+  $WEASY_FLAG \
   --collect-all yt_dlp \
   --collect-all playwright \
   --collect-all pypdf \

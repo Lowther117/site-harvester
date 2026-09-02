@@ -1,7 +1,22 @@
+# Site Harvester - runtime + build requirements (Windows, macOS and Linux)
+
 requests>=2.31.0
 beautifulsoup4>=4.12.0
-weasyprint>=61.0
 yt-dlp>=2024.1.1
 playwright>=1.40.0
 pypdf>=4.0.0
+
+# Build-time only: turns the script into a double-clickable app.
 pyinstaller>=6.0.0
+
+# NOTE ON PDF OUTPUT
+# The PDF is produced by the headless Chromium that Playwright installs, and
+# the pages are merged with pypdf. Both are above, so PDF output works out of
+# the box on every platform.
+#
+# WeasyPrint is only a lower-fidelity fallback for when Chromium cannot start.
+# It is deliberately NOT listed here: on Windows it additionally needs the Pango
+# system libraries via MSYS2, which is a heavy prerequisite for a fallback that
+# should never run. To install it anyway:
+#
+#     pip install -r requirements-fallback.txt

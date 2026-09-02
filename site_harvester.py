@@ -1,26 +1,36 @@
 #!/usr/bin/env python3
 """
 Site Harvester
-A simple macOS desktop app that crawls a website and downloads every file it can
-find (documents, images, videos, audio, archives, and anything else), sorting the
-results into folders by file type — and optionally saves a single, clickable PDF
-copy of every page it visits.
+A desktop app for Windows, macOS and Linux that crawls a website and downloads
+every file it can find (documents, images, videos, audio, archives, and anything
+else), sorting the results into folders by file type — and optionally saves a
+single, clickable PDF copy of every page it visits.
 
 GUI: Tkinter (bundled with Python, nothing extra to install for the interface)
 Crawling/parsing: requests + beautifulsoup4
-Page-to-PDF: weasyprint (needs the 'pango' system library; build.sh installs it)
-Bundling into a .app: PyInstaller (see build.sh)
+Page-to-PDF: the headless Chromium that Playwright installs prints each page,
+    and pypdf merges them. WeasyPrint is an optional lower-fidelity fallback
+    for when Chromium cannot start (see requirements-fallback.txt).
+Bundling: PyInstaller — build.sh on macOS, build.bat on Windows
+
+This crawler does not consult robots.txt and does not pause between requests.
+Use it on sites you own or have permission to copy.
 """
 
 import os
 import re
 import shutil
 import queue
+import subprocess
+import sys
 import threading
 import mimetypes
 from html import escape
 from collections import deque
 from urllib.parse import urljoin, urlparse, unquote
+
+IS_WINDOWS = sys.platform.startswith("win")
+IS_MAC = sys.platform == "darwin"
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -201,14 +211,37 @@ def safe_dirname(name):
 
 
 def find_ffmpeg_dir():
-    """Locate ffmpeg. GUI apps launched from Finder often have a bare PATH, so
-    check the usual Homebrew spots explicitly as well as PATH."""
-    for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg",
-              "/usr/bin/ffmpeg"):
-        if os.path.exists(p):
-            return os.path.dirname(p)
-    w = shutil.which("ffmpeg")
-    return os.path.dirname(w) if w else None
+    """Locate ffmpeg.
+
+    PATH is checked first, then the usual install locations for each platform.
+    The explicit list matters because GUI apps launched from Finder (macOS) or
+    from a shortcut (Windows) often start with a bare PATH that does not include
+    Homebrew, winget shims or a manually unzipped build."""
+    exe = "ffmpeg.exe" if IS_WINDOWS else "ffmpeg"
+
+    w = shutil.which(exe) or shutil.which("ffmpeg")
+    if w:
+        return os.path.dirname(w)
+
+    candidates = []
+    if IS_WINDOWS:
+        import glob
+        local = os.environ.get("LOCALAPPDATA", "")
+        for pattern in (
+            r"C:\ffmpeg*\bin\ffmpeg.exe",
+            r"C:\Program Files\ffmpeg*\bin\ffmpeg.exe",
+            os.path.join(local, "Microsoft", "WinGet", "Packages",
+                         "*FFmpeg*", "**", "ffmpeg.exe"),
+        ):
+            candidates += sorted(glob.glob(pattern, recursive=True), reverse=True)
+    else:
+        candidates += ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg",
+                       "/usr/bin/ffmpeg"]
+
+    for c in candidates:
+        if os.path.exists(c):
+            return os.path.dirname(c)
+    return None
 
 
 # Map real content-types to a file extension. This is more reliable than
@@ -1814,10 +1847,22 @@ class App(tk.Tk):
 
     def _open_folder(self):
         path = self.out_var.get()
-        if os.path.isdir(path):
-            os.system(f'open "{path}"')
-        else:
+        if not os.path.isdir(path):
             messagebox.showinfo("Site Harvester", "That folder doesn't exist yet.")
+            return
+        # os.system with an interpolated path breaks on quotes and is shell-
+        # dependent; each platform has a proper call for this.
+        try:
+            if IS_WINDOWS:
+                os.startfile(path)                                  # noqa: S606
+            elif IS_MAC:
+                subprocess.run(["open", path], check=False)
+            else:
+                subprocess.run(["xdg-open", path], check=False)
+        except Exception as e:
+            messagebox.showinfo(
+                "Site Harvester",
+                f"Could not open the folder automatically ({e}).\n\n{path}")
 
     def _append_log(self, msg):
         self.log_text.config(state="normal")

@@ -1,36 +1,63 @@
 # Site Harvester
 
-A small Mac app that takes a website address, lets you pick how much of the site
-to scan and which file types to grab, then downloads everything it finds into
-tidy folders (Images, Videos, Documents, Audio, Archives — and an "Other" folder
-that adapts to any file extension it runs into).
+A desktop app for **Windows and macOS** that takes a website address, lets you
+pick how much of the site to scan and which file types to grab, then downloads
+everything it finds into tidy folders (Images, Videos, Documents, Audio,
+Archives — and an "Other" folder that adapts to any file extension it runs into).
+
+> **Before you point it at anything:** this crawler does not consult or obey
+> `robots.txt`, and it does not pause between requests. It also sends a
+> browser-like User-Agent (with `SiteHarvester/1.0` appended) so that servers
+> which reject unknown clients still respond. Use it on sites you own or have
+> permission to copy, and read the terms of any site you don't.
+
+## Running it
+
+You need **Python 3.9 or newer**:
+
+- Windows: `winget install -e --id Python.Python.3.12`
+- macOS: `brew install python` (plus `brew install python-tk` if the window
+  won't open — some Python builds omit Tk)
+
+Then:
+
+- **Windows** — double-click `run.bat`
+- **macOS** — double-click `run.command`
+
+The first run builds its own Python environment inside this folder and downloads
+the headless browser it uses for PDF output. That takes a few minutes. After
+that it starts straight away. Nothing is installed system-wide.
+
+On macOS the first double-click may be refused because the file came from the
+internet: right-click → Open and confirm once, or run
+`chmod +x run.command` in Terminal.
+
+**Optional: ffmpeg.** Everything works without it except best-quality and
+embedded video, which needs it to join separate video and audio streams.
+
+- Windows: `winget install -e --id Gyan.FFmpeg`
+- macOS: `brew install ffmpeg`
+
+## Building a standalone app
+
+Optional — `run.bat` / `run.command` are already double-clickable. Build only if
+you want something you can move to another machine.
+
+- **Windows** — double-click `build.bat`, then find
+  `dist\Site Harvester\Site Harvester.exe`
+- **macOS** — double-click `Build Site Harvester.command`, then drag
+  `dist/Site Harvester.app` into Applications. The first time you open it,
+  right-click → Open and confirm.
 
 ## What you get
 
-- `Build Site Harvester.command` — double-click this to build the app
 - `site_harvester.py` — the app itself
-- `build.sh` — the builder that `Build Site Harvester.command` runs
+- `run.bat` / `run.command` — launchers (build an environment, then start it)
+- `build.bat` / `build.sh` — optional standalone builders
+- `Build Site Harvester.command` — double-clickable wrapper around `build.sh`
 - `requirements.txt` — the libraries it needs
+- `requirements-fallback.txt` — the optional PDF fallback (see below)
 - `README.md` — this file
-
-## How to build the app (the easy way — just double-click)
-
-1. **Double-click `Build Site Harvester.command`.** A Terminal window opens,
-   installs everything, and builds the app. When it finishes it opens a `dist`
-   folder containing **Site Harvester.app**.
-   - The first time, macOS may say it's from an unidentified developer. If so,
-     **right-click the file → Open → Open**. You only need to do this once.
-2. Drag **Site Harvester.app** into your **Applications** folder.
-3. The first time you open the app, **right-click it → Open** and confirm. macOS
-   asks this once for any app you built yourself; after that it opens normally.
-
-Rebuild any time after changes by double-clicking `Build Site Harvester.command`
-again.
-
-### Prefer the Terminal instead?
-
-Run `bash ` (with a space) followed by the path to `build.sh`, e.g.
-`bash ~/Downloads/SiteHarvester/build.sh`.
 
 ## How to use it
 
@@ -109,9 +136,18 @@ If the PDF option is on, Site Harvester saves every page it visited into a singl
   PDF, so clicking a link on one captured page takes you to that page in the PDF
 - **external links kept clickable** so they open in your browser
 
-This needs one extra system library, `pango`. The build script installs it for you
-via Homebrew. If it's missing, downloading still works — only the PDF is skipped,
-and the log tells you how to add it (`brew install pango`).
+Each page is printed by the headless Chromium that Playwright downloads on first
+run, so pages keep their real layout, CSS and images; the pages are then merged
+with pypdf. Both are installed for you, on every platform, so this works out of
+the box — nothing else to install.
+
+If Chromium can't start for some reason, there is a lower-fidelity text fallback
+using WeasyPrint. It is **not** installed by default, because on Windows it also
+needs the Pango system libraries via MSYS2 — a heavy prerequisite for something
+that should never run. If you want it anyway:
+`pip install -r requirements-fallback.txt` (see that file for the system
+libraries each platform needs). Without it, a Chromium failure means the PDF is
+skipped and the log says why; downloading files is unaffected either way.
 
 ## How it finds files (works across most site builders)
 
@@ -148,17 +184,28 @@ rather than failing, and the log tells you how to install it
   links to other websites too* only when you really want it to go off-site.
 - It only downloads files that are actually linked in the page's HTML. It can't
   reach content that's hidden behind logins or loaded by heavy JavaScript.
-- Please use it on sites you own or have permission to download from, and be
-  mindful of each site's terms of use and copyright.
+- **It does not obey `robots.txt` and does not rate-limit itself.** There is no
+  delay between requests, so a large crawl hits a server hard. Use it on sites
+  you own or have permission to download from, be mindful of each site's terms
+  of use and copyright, and prefer a shallow depth on anything you don't own.
 
 ## Troubleshooting
 
-- **"Python 3 is not installed."** Install it from
-  https://www.python.org/downloads/macos/ and run `build.sh` again.
-- **App won't open (unidentified developer).** Right-click it → Open → Open. This
-  is normal for self-built apps and only happens once.
-- **Want to test it without building?** In Terminal, from inside this folder:
-  `pip3 install -r requirements.txt` then `python3 site_harvester.py`.
+- **"Python was not found."** Install it — `winget install -e --id
+  Python.Python.3.12` on Windows, `brew install python` on macOS — then run the
+  launcher again.
+- **The window doesn't open on macOS.** Some Python builds ship without Tk:
+  `brew install python-tk`.
+- **App won't open (unidentified developer).** macOS only. Right-click it → Open
+  → Open. Normal for self-built apps, and only once.
+- **"PDF FALLBACK" in the log.** Chromium didn't start. Delete the `.venv-win` /
+  `.venv-mac` folder and run the launcher again so it re-downloads, or run
+  `python -m playwright install chromium` inside that environment.
+- **Windows: embedded video is missing or low quality.** ffmpeg isn't installed:
+  `winget install -e --id Gyan.FFmpeg`.
+- **Want to run it by hand?** From inside this folder:
+  `pip install -r requirements.txt` then `python site_harvester.py`
+  (`python3` on macOS).
 
 ---
 

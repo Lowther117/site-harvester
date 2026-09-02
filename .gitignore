@@ -1,7 +1,16 @@
-__pycache__/
-*.pyc
+# machine-specific - each computer builds its own
+.venv/
+.venv-win/
+.venv-mac/
+.buildvenv/
+.buildvenv-win/
+
+# build output
 build/
 dist/
 *.spec
-.buildvenv/
+
+# noise
+__pycache__/
+*.pyc
 .DS_Store
