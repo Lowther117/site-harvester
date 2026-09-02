@@ -11,32 +11,42 @@ Archives — and an "Other" folder that adapts to any file extension it runs int
 > which reject unknown clients still respond. Use it on sites you own or have
 > permission to copy, and read the terms of any site you don't.
 
-## Running it
+## Setting it up
 
-You need **Python 3.9 or newer**:
+**Windows** — double-click `run.bat`
+**macOS** — double-click `run.command`
+
+That is the whole setup. The first run installs everything the app needs and
+then opens it; every run after that just opens it. Expect a few minutes the
+first time, most of it downloading the headless browser.
+
+You need **Python** on the machine first — that is the one thing a double-click
+cannot arrange for itself:
 
 - Windows: `winget install -e --id Python.Python.3.12`
 - macOS: `brew install python` (plus `brew install python-tk` if the window
   won't open — some Python builds omit Tk)
 
-Then:
+### What the first run actually does
 
-- **Windows** — double-click `run.bat`
-- **macOS** — double-click `run.command`
+So there are no surprises:
 
-The first run builds its own Python environment inside this folder and downloads
-the headless browser it uses for PDF output. That takes a few minutes. After
-that it starts straight away. Nothing is installed system-wide.
+| | Windows | macOS |
+|---|---|---|
+| Python packages | into `.venv-win\` in this folder | into `.venv-mac/` in this folder |
+| Headless Chromium | Playwright's own cache | Playwright's own cache |
+| ffmpeg (optional) | portable copy downloaded into `tools\` | `brew install ffmpeg` |
+
+Nothing needs administrator permission and nothing goes on your PATH. On Windows
+everything lands inside this folder, so deleting the folder removes all of it.
+
+ffmpeg is genuinely optional — without it everything works except embedded and
+best-quality video, so a failure there is a note rather than a stop. On macOS it
+comes from Homebrew; if Homebrew isn't installed you get the link and the app
+still opens.
 
 On macOS the first double-click may be refused because the file came from the
-internet: right-click → Open and confirm once, or run
-`chmod +x run.command` in Terminal.
-
-**Optional: ffmpeg.** Everything works without it except best-quality and
-embedded video, which needs it to join separate video and audio streams.
-
-- Windows: `winget install -e --id Gyan.FFmpeg`
-- macOS: `brew install ffmpeg`
+internet: right-click → Open and confirm once, or run `chmod +x run.command`.
 
 ## Building a standalone app
 
@@ -55,6 +65,7 @@ you want something you can move to another machine.
 - `run.bat` / `run.command` — launchers (build an environment, then start it)
 - `build.bat` / `build.sh` — optional standalone builders
 - `Build Site Harvester.command` — double-clickable wrapper around `build.sh`
+- `setup.ps1` — the Windows first-run setup that `run.bat` calls
 - `requirements.txt` — the libraries it needs
 - `requirements-fallback.txt` — the optional PDF fallback (see below)
 - `README.md` — this file
@@ -201,8 +212,10 @@ rather than failing, and the log tells you how to install it
 - **"PDF FALLBACK" in the log.** Chromium didn't start. Delete the `.venv-win` /
   `.venv-mac` folder and run the launcher again so it re-downloads, or run
   `python -m playwright install chromium` inside that environment.
-- **Windows: embedded video is missing or low quality.** ffmpeg isn't installed:
-  `winget install -e --id Gyan.FFmpeg`.
+- **Embedded video is missing or low quality.** ffmpeg isn't there. On Windows,
+  delete the `tools\ffmpeg` folder and run `run.bat` again so it re-downloads,
+  or install it yourself with `winget install -e --id Gyan.FFmpeg`. On macOS:
+  `brew install ffmpeg`.
 - **Want to run it by hand?** From inside this folder:
   `pip install -r requirements.txt` then `python site_harvester.py`
   (`python3` on macOS).

@@ -47,13 +47,26 @@ echo Building...
   site_harvester.py
 if errorlevel 1 goto :failed
 
+rem The intermediate "build" folder also contains a Site Harvester.exe, but it
+rem is a half-assembled bootloader with no _internal alongside it. Launching
+rem that one fails with "Failed to load Python DLL ... python3xx.dll". Delete it
+rem so there is only one exe to find, and open the real one for the user.
+if exist "build\Site Harvester\Site Harvester.exe" del /q "build\Site Harvester\Site Harvester.exe"
+
 echo.
 echo ================================================
 echo   Done
 echo ================================================
 echo.
-echo Your app is here:
+echo Your app is the one in the DIST folder:
+echo.
 echo   %CD%\dist\Site Harvester\Site Harvester.exe
+echo.
+echo Do not run anything from the "build" folder - that is scratch work
+echo left behind by the builder, and it will not start.
+echo.
+echo Opening the dist folder now...
+start "" "%CD%\dist\Site Harvester"
 echo.
 pause
 exit /b 0

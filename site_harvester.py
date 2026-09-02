@@ -32,6 +32,21 @@ from urllib.parse import urljoin, urlparse, unquote
 IS_WINDOWS = sys.platform.startswith("win")
 IS_MAC = sys.platform == "darwin"
 
+# The launcher can drop a portable ffmpeg into ./tools rather than installing
+# anything system-wide, so that folder is searched before PATH.
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+TOOLS_DIR = os.path.join(APP_DIR, "tools")
+
+
+def _in_tools(exe_name):
+    """First matching executable anywhere under ./tools, or None."""
+    if not os.path.isdir(TOOLS_DIR):
+        return None
+    for root, _dirs, files in os.walk(TOOLS_DIR):
+        if exe_name in files:
+            return os.path.join(root, exe_name)
+    return None
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -218,6 +233,10 @@ def find_ffmpeg_dir():
     from a shortcut (Windows) often start with a bare PATH that does not include
     Homebrew, winget shims or a manually unzipped build."""
     exe = "ffmpeg.exe" if IS_WINDOWS else "ffmpeg"
+
+    local = _in_tools(exe)
+    if local:
+        return os.path.dirname(local)
 
     w = shutil.which(exe) or shutil.which("ffmpeg")
     if w:
