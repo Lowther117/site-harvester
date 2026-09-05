@@ -7,16 +7,24 @@ rem for making a standalone folder you can move to another PC.
 
 cd /d "%~dp0"
 
-where py >nul 2>nul
-if errorlevel 1 (set "PY=python") else (set "PY=py -3")
-
 echo ================================================
 echo   Building Site Harvester.exe
 echo ================================================
 echo.
 
+rem Find a REAL Python - the py launcher counts, the Microsoft Store's fake
+rem python.exe stub does not - and install Python automatically if there is
+rem none (winget first, python.org directly when winget is broken).
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0ensure_python.ps1" >nul
+if errorlevel 1 goto :no_python
+set "SYSPY="
+for /f "usebackq delims=" %%I in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0ensure_python.ps1" -NoInstall`) do set "SYSPY=%%I"
+if not defined SYSPY goto :no_python
+echo Using Python: %SYSPY%
+echo.
+
 if exist ".buildvenv-win" rmdir /s /q ".buildvenv-win"
-%PY% -m venv ".buildvenv-win"
+"%SYSPY%" -m venv ".buildvenv-win"
 if errorlevel 1 goto :failed
 set "VPY=.buildvenv-win\Scripts\python.exe"
 
@@ -70,6 +78,16 @@ start "" "%CD%\dist\Site Harvester"
 echo.
 pause
 exit /b 0
+
+:no_python
+echo.
+echo Python could not be found, and the automatic install did not complete
+echo either (the messages above say why). If Python was just installed for
+echo the first time, close this window and run build.bat again - a fresh
+echo window picks up the new install.
+echo.
+pause
+exit /b 1
 
 :failed
 echo.

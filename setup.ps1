@@ -69,21 +69,22 @@ Write-Step 'Python environment'
 if (Test-Path $VenvPy) {
     Write-Ok 'Already set up.'
 } else {
-    # Build the command and its arguments separately and splat them. An array
-    # slice like $a[1..($a.Length-1)] silently reverses on a one-element array,
-    # which would pass the interpreter its own name as an argument.
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        $pyCmd = 'py'; $pyArgs = @('-3')
-    } elseif (Get-Command python -ErrorAction SilentlyContinue) {
-        $pyCmd = 'python'; $pyArgs = @()
-    } else {
+    # ensure_python.ps1 finds a REAL interpreter (the py launcher counts, the
+    # Microsoft Store's fake python.exe stub does not) and installs Python
+    # automatically when the PC has none - winget first, python.org directly
+    # when winget is broken. It prints the interpreter path as its last line.
+    $sysPy = (& (Join-Path $PSScriptRoot 'ensure_python.ps1') |
+              Select-Object -Last 1)
+    if (-not $sysPy -or -not (Test-Path "$sysPy")) {
         Write-Host ''
-        Write-Host 'Python was not found.' -ForegroundColor Red
-        Write-Host '  Install it:  winget install -e --id Python.Python.3.12'
+        Write-Host 'Python was not found and could not be installed automatically.' -ForegroundColor Red
+        Write-Host '  Install it from https://www.python.org/downloads/windows/'
+        Write-Host '  (tick "Add python.exe to PATH"), then run this again.'
         exit 1
     }
+    Write-Host "   Using Python: $sysPy"
     Write-Host '   Creating it (first run only)...'
-    & $pyCmd @pyArgs -m venv $VenvDir
+    & "$sysPy" -m venv $VenvDir
     & $VenvPy -m pip install --upgrade pip --quiet
     Write-Host '   Installing libraries (yt-dlp, Playwright and friends)...'
     & $VenvPy -m pip install -r (Join-Path $PSScriptRoot 'requirements.txt') --quiet

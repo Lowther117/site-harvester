@@ -20,12 +20,10 @@ That is the whole setup. The first run installs everything the app needs and
 then opens it; every run after that just opens it. Expect a few minutes the
 first time, most of it downloading the headless browser.
 
-You need **Python** on the machine first — that is the one thing a double-click
-cannot arrange for itself:
-
-- Windows: `winget install -e --id Python.Python.3.12`
-- macOS: `brew install python` (plus `brew install python-tk` if the window
-  won't open — some Python builds omit Tk)
+On **Windows** even Python takes care of itself: if none is found, the first
+run installs it automatically (winget first, python.org directly when winget
+is unwell). On **macOS** install it once with `brew install python` (plus
+`brew install python-tk` if the window won't open — some builds omit Tk).
 
 ### What the first run actually does
 
@@ -202,9 +200,10 @@ rather than failing, and the log tells you how to install it
 
 ## Troubleshooting
 
-- **"Python was not found."** Install it — `winget install -e --id
-  Python.Python.3.12` on Windows, `brew install python` on macOS — then run the
-  launcher again.
+- **"Python was not found."** On Windows this now installs itself - if the
+  automatic install could not finish, the messages in the window say why; a
+  freshly installed Python needs the window closed and the launcher run again.
+  On macOS: `brew install python`, then run the launcher again.
 - **The window doesn't open on macOS.** Some Python builds ship without Tk:
   `brew install python-tk`.
 - **App won't open (unidentified developer).** macOS only. Right-click it → Open

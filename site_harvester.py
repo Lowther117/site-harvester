@@ -50,6 +50,77 @@ def _in_tools(exe_name):
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+# --------------------------------------------------------------------------- #
+# Appearance: light and dark mode.
+#
+# Follows the operating system's setting automatically; the Appearance menu
+# overrides it, and that choice is remembered in a small file next to the app.
+# The clam ttk theme is the one theme that recolours fully, so both modes
+# style it from a single palette - same approach as findex.
+# --------------------------------------------------------------------------- #
+
+LIGHT_PALETTE = {
+    "bg": "#f5f6f8", "fg": "#16191d", "field": "#ffffff",
+    "btn": "#e8eaee", "btn_hi": "#dde0e6",
+    "sel": "#1f6fd6", "sel_fg": "#ffffff",
+    "hint": "#5c6672", "accent": "#1a5fb4", "border": "#cfd4db",
+}
+DARK_PALETTE = {
+    "bg": "#1e2226", "fg": "#e2e8ee", "field": "#272c31",
+    "btn": "#343b42", "btn_hi": "#3f474f",
+    "sel": "#2f74c9", "sel_fg": "#ffffff",
+    "hint": "#9aa5b0", "accent": "#79b3ef", "border": "#3d444c",
+}
+
+# In a PyInstaller build, "next to the app" is next to the .exe, not inside
+# the unpacked _internal folder.
+if getattr(sys, "frozen", False):
+    UI_SETTINGS = os.path.join(os.path.dirname(sys.executable),
+                               "site_harvester_ui.json")
+else:
+    UI_SETTINGS = os.path.join(APP_DIR, "site_harvester_ui.json")
+
+
+def system_dark():
+    """Is the operating system currently in dark mode?"""
+    try:
+        if IS_MAC:
+            r = subprocess.run(["defaults", "read", "-g",
+                                "AppleInterfaceStyle"],
+                               capture_output=True, text=True, timeout=5)
+            return "dark" in r.stdout.lower()
+        if IS_WINDOWS:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Themes"
+                r"\Personalize")
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            return value == 0
+    except Exception:
+        pass
+    return False
+
+
+def load_theme_choice():
+    """'system', 'light' or 'dark' - whatever was chosen last time."""
+    import json
+    try:
+        with open(UI_SETTINGS, encoding="utf-8") as fh:
+            choice = json.load(fh).get("theme", "system")
+        return choice if choice in ("system", "light", "dark") else "system"
+    except Exception:
+        return "system"
+
+
+def save_theme_choice(choice):
+    import json
+    try:
+        with open(UI_SETTINGS, "w", encoding="utf-8") as fh:
+            json.dump({"theme": choice}, fh)
+    except OSError:
+        pass
+
 try:
     import requests
     from bs4 import BeautifulSoup
@@ -1756,8 +1827,95 @@ class App(tk.Tk):
         self.site_status = {}   # tag -> {pages, queued, files}
         self.labels = {}        # tag -> short display label
 
+        self.theme_var = tk.StringVar(value=load_theme_choice())
+        self._last_dark = None
+        self._build_menu()
         self._build_ui()
+        self._apply_theme()
         self.after(100, self._drain_log)
+        self.after(20000, self._theme_tick)
+
+    def _build_menu(self):
+        bar = tk.Menu(self)
+        m = tk.Menu(bar, tearoff=0)
+        for label, value in (("Match system", "system"), ("Light", "light"),
+                             ("Dark", "dark")):
+            m.add_radiobutton(label=label, value=value,
+                              variable=self.theme_var,
+                              command=self._theme_chosen)
+        bar.add_cascade(label="Appearance", menu=m)
+        self.config(menu=bar)
+
+    def _theme_chosen(self):
+        save_theme_choice(self.theme_var.get())
+        self._apply_theme()
+
+    def _theme_tick(self):
+        """Follow the OS when it switches mode while the app is open."""
+        try:
+            if (self.theme_var.get() == "system"
+                    and system_dark() != self._last_dark):
+                self._apply_theme()
+        except Exception:
+            pass
+        self.after(20000, self._theme_tick)
+
+    def _apply_theme(self):
+        choice = self.theme_var.get()
+        dark = choice == "dark" or (choice == "system" and system_dark())
+        self._last_dark = dark
+        pal = DARK_PALETTE if dark else LIGHT_PALETTE
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")     # the one theme that recolours fully
+        except tk.TclError:
+            pass
+        style.configure(".", background=pal["bg"], foreground=pal["fg"],
+                        bordercolor=pal["border"], focuscolor=pal["accent"],
+                        lightcolor=pal["bg"], darkcolor=pal["bg"],
+                        troughcolor=pal["btn"])
+        for cls in ("TFrame", "TLabel", "TCheckbutton"):
+            style.configure(cls, background=pal["bg"], foreground=pal["fg"])
+        style.map("TCheckbutton", background=[("active", pal["bg"])],
+                  foreground=[("disabled", pal["hint"])])
+        style.configure("TButton", background=pal["btn"],
+                        foreground=pal["fg"], bordercolor=pal["border"],
+                        lightcolor=pal["btn"], darkcolor=pal["btn"],
+                        padding=(12, 5))
+        style.map("TButton",
+                  background=[("pressed", pal["btn_hi"]),
+                              ("active", pal["btn_hi"])],
+                  foreground=[("disabled", pal["hint"])])
+        for cls in ("TEntry", "TCombobox"):
+            style.configure(cls, fieldbackground=pal["field"],
+                            foreground=pal["fg"], insertcolor=pal["fg"],
+                            background=pal["btn"], arrowcolor=pal["fg"],
+                            bordercolor=pal["border"],
+                            lightcolor=pal["field"], darkcolor=pal["field"],
+                            padding=4)
+            style.map(cls, bordercolor=[("focus", pal["accent"])],
+                      lightcolor=[("focus", pal["accent"])],
+                      darkcolor=[("focus", pal["accent"])],
+                      fieldbackground=[("readonly", pal["field"])],
+                      foreground=[("readonly", pal["fg"])],
+                      selectbackground=[("readonly", pal["field"])],
+                      selectforeground=[("readonly", pal["fg"])])
+        style.configure("Vertical.TScrollbar", background=pal["btn"],
+                        troughcolor=pal["bg"], bordercolor=pal["bg"],
+                        arrowcolor=pal["hint"], lightcolor=pal["btn"],
+                        darkcolor=pal["btn"])
+        style.configure("Horizontal.TProgressbar", background=pal["sel"],
+                        troughcolor=pal["btn"], bordercolor=pal["border"],
+                        lightcolor=pal["sel"], darkcolor=pal["sel"])
+        self.configure(background=pal["bg"])
+        for txt in (self.url_text, self.log_text):
+            txt.configure(background=pal["field"], foreground=pal["fg"],
+                          insertbackground=pal["fg"],
+                          selectbackground=pal["sel"],
+                          selectforeground=pal["sel_fg"],
+                          relief="flat", highlightthickness=1,
+                          highlightbackground=pal["border"],
+                          highlightcolor=pal["accent"])
 
     def _build_ui(self):
         pad = {"padx": 12, "pady": 6}
