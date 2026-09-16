@@ -1,0 +1,32 @@
+# machine-specific - each computer builds its own
+.venv/
+.venv-win/
+.venv-mac/
+.buildvenv/
+.buildvenv-win/
+
+# optional standalone builds (build-exe.bat / build-app.command)
+.venv-build/
+.venv-build-mac/
+build/
+dist/
+*.spec
+
+# build logs and reports (build-exe.bat / build-app.command)
+build-win-log.txt
+build-mac-log.txt
+harvester-selftest.txt
+harvester-crash.log
+
+# settings the app writes next to itself
+site_harvester_ui.json
+
+# noise
+__pycache__/
+*.pyc
+*.bak
+.DS_Store
+.fuse_hidden*
+
+# downloaded on first run by the launcher - not source
+tools/
