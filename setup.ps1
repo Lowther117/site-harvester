@@ -88,7 +88,12 @@ if (Test-Path $VenvPy) {
     & $VenvPy -m pip install --upgrade pip --quiet
     Write-Host '   Installing libraries (yt-dlp, Playwright and friends)...'
     & $VenvPy -m pip install -r (Join-Path $PSScriptRoot 'requirements.txt') --quiet
-    if ($LASTEXITCODE -ne 0) { throw 'pip install failed.' }
+    if ($LASTEXITCODE -ne 0) {
+        # A half-built environment would count as 'Already set up.' next time
+        # and the libraries would never be installed - remove it so a re-run retries.
+        Remove-Item -LiteralPath $VenvDir -Recurse -Force -ErrorAction SilentlyContinue
+        throw 'pip install failed.'
+    }
     Write-Ok 'Done.'
 }
 

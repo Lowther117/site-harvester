@@ -335,7 +335,11 @@ def get_extension(url):
     path = urlparse(url).path
     name = unquote(os.path.basename(path))
     if "." in name:
-        return name.rsplit(".", 1)[1].lower().strip()
+        ext = name.rsplit(".", 1)[1].lower().strip()
+        # The extension becomes a folder name (Other/<ext>), and a percent-
+        # encoded slash or backslash in it would point that folder anywhere on disk.
+        if re.fullmatch(r"[a-z0-9_+~-]{1,16}", ext):
+            return ext
     return ""
 
 
@@ -371,6 +375,8 @@ def base_domain(host):
     host = host.split(":")[0]          # drop any port
     if host.startswith("www."):
         host = host[4:]
+    if re.fullmatch(r"[0-9.]+", host):  # an IPv4 address has no "domain"
+        return host
     parts = [p for p in host.split(".") if p]
     if len(parts) >= 3 and ".".join(parts[-2:]) in TWO_PART_SUFFIXES:
         return ".".join(parts[-3:])
@@ -823,6 +829,7 @@ class Harvester:
         self.counts = {}
         self.file_total = 0
         self.pages = []          # (url, html) captured for the PDF
+        self.redirected = {}     # address asked for -> where it really landed
         self.queue_size = 0
 
         # yt-dlp state (set up lazily on first video found).
@@ -1073,10 +1080,17 @@ class Harvester:
         except Exception as e:
             self.log(f"   (render failed, using fast mode: {e})")
             try:
-                resp = self.session.get(url, timeout=20)
-                if "text/html" in resp.headers.get("Content-Type", "").lower():
-                    self._final_url = resp.url or url
-                    return decode_html(resp.content, resp.headers)
+                resp = self.session.get(url, timeout=20, stream=True)
+                try:
+                    if "text/html" in resp.headers.get("Content-Type", "").lower():
+                        self._final_url = resp.url or url
+                        return decode_html(resp.content, resp.headers)
+                    # Chromium refuses to "navigate" to a download ("Download
+                    # is starting"), so a file behind a plain link lands
+                    # here - keep it, as fast mode does.
+                    self._save_fetched_file(url, resp)
+                finally:
+                    resp.close()
             except Exception:
                 pass
             return None
@@ -1125,14 +1139,20 @@ class Harvester:
             self.log(f"   (skipped, could not read page: {e})")
             return set()
 
-        if self.make_pdf or self.make_mirror:
-            self.pages.append((url, html))
-
         # If we were redirected, the page we landed on counts as visited too,
         # so it is not fetched a second time under its own address.
         final = normalize_url(self._final_url or url)
         if final != url:
+            seen = final in self.visited_pages
             self.visited_pages.add(final)
+            self.redirected[url] = final
+            if seen:        # already handled under its own address
+                return set()
+
+        # Captured under the address it landed on: that is what the site's own
+        # links (and the page's relative links) refer to in the PDF and mirror.
+        if self.make_pdf or self.make_mirror:
+            self.pages.append((final, html))
         # A <base href> changes what every relative link on the page means.
         base = final
         base_tag = soup.find("base", href=True)
@@ -1210,7 +1230,9 @@ class Harvester:
         name = unquote(seg) if seg else safe_filename(url)
         name = _clean_name(name)
         if not name.lower().endswith("." + ext):
-            name = f"{name}.{ext}"
+            # _clean_name() cut a long name at 180, so trim the stem rather
+            # than letting the [:180] below slice the extension back off.
+            name = f"{name[:179 - len(ext)]}.{ext}"
         return name[:180]
 
     def _download(self, url, ext=None):
@@ -1234,6 +1256,7 @@ class Harvester:
             self.log(f"   ✗ failed: {url} — {e}")
             return
 
+        partial = None
         try:
             # If the URL didn't reveal an extension, learn it from the headers
             # (Content-Disposition filename, then a real content-type map). This
@@ -1266,6 +1289,7 @@ class Harvester:
                 dest = f"{b}_{i}{x}"
                 i += 1
 
+            partial = dest
             with open(_fs(dest), "wb") as f:
                 for chunk in r.iter_content(chunk_size=65536):
                     if self.stop_event.is_set():
@@ -1274,14 +1298,24 @@ class Harvester:
                         return
                     if chunk:
                         f.write(chunk)
+            partial = None
             self.counts[cat] = self.counts.get(cat, 0) + 1
             self.file_total += 1
             self.log(f"   ✓ saved [{cat}] {os.path.basename(dest)}")
             self.status()
         except Exception as e:
             self.log(f"   ✗ failed: {url} — {e}")
+            self._discard_partial(partial)
         finally:
             r.close()
+
+    def _discard_partial(self, path):
+        """A download that broke half-way must not be left looking complete."""
+        if path:
+            try:
+                os.remove(_fs(path))
+            except OSError:
+                pass
 
     def _save_fetched_file(self, url, resp):
         """Save an already-fetched, non-HTML response as a file if its type is
@@ -1308,13 +1342,14 @@ class Harvester:
             folder = os.path.join(self.site_dir, cat)
 
         self.downloaded.add(key)
+        partial = None
         try:
             os.makedirs(_fs(folder), exist_ok=True)
             # Keep the server-provided filename when there is one.
             cd_name = name_from_content_disposition(resp.headers)
             if cd_name:
                 if not cd_name.lower().endswith("." + ext):
-                    cd_name = f"{cd_name}.{ext}"
+                    cd_name = f"{cd_name[:179 - len(ext)]}.{ext}"
                 name = cd_name[:180]
             else:
                 name = self._filename_for(url, ext)
@@ -1324,6 +1359,7 @@ class Harvester:
             while os.path.exists(_fs(dest)):
                 dest = f"{b}_{i}{x}"
                 i += 1
+            partial = dest
             with open(_fs(dest), "wb") as f:
                 for chunk in resp.iter_content(chunk_size=65536):
                     if self.stop_event.is_set():
@@ -1332,12 +1368,14 @@ class Harvester:
                         return
                     if chunk:
                         f.write(chunk)
+            partial = None
             self.counts[cat] = self.counts.get(cat, 0) + 1
             self.file_total += 1
             self.log(f"   ✓ saved [{cat}] {os.path.basename(dest)}")
             self.status()
         except Exception as e:
             self.log(f"   ✗ failed: {url} — {e}")
+            self._discard_partial(partial)
 
     # ---- best-quality videos via yt-dlp ---------------------------------- #
     def _ensure_ydl(self):
@@ -1568,6 +1606,12 @@ class Harvester:
             " Click an entry to jump to that page.</p>"
             f"<ol>{items}</ol></body></html>")
 
+    def _add_redirect_aliases(self, index):
+        """Let a link to an address that redirected reach the captured page."""
+        for asked, landed in self.redirected.items():
+            if landed in index:
+                index.setdefault(asked, index[landed])
+
     def _page_title(self, html):
         try:
             soup = BeautifulSoup(html, "html.parser")
@@ -1730,6 +1774,7 @@ class Harvester:
                 writer.add_page(pg)
             url_to_index[url.split("#")[0]] = idx
             starts.append((title or url, idx))
+        self._add_redirect_aliases(url_to_index)
 
         # Bookmark outline — one clickable entry per captured page.
         for title, idx in starts:
@@ -1791,6 +1836,7 @@ class Harvester:
         url_to_anchor = {}
         for i, (url, _html) in enumerate(self.pages):
             url_to_anchor[url.split("#")[0]] = f"page-{i + 1}"
+        self._add_redirect_aliases(url_to_anchor)
 
         toc_items = []
         sections = []
@@ -1817,7 +1863,7 @@ class Harvester:
                         continue
                     absu = urljoin(url, v)
                     if tag == "a":
-                        target = absu.split("#")[0]
+                        target = normalize_url(absu)
                         el[attr] = "#" + url_to_anchor[target] if target in url_to_anchor else absu
                     else:
                         el[attr] = absu
@@ -1884,6 +1930,7 @@ class Harvester:
         url_to_index = {}
         for i, (u, _h) in enumerate(self.pages):
             url_to_index[u.split("#")[0]] = i
+        self._add_redirect_aliases(url_to_index)
 
         entries = []      # (title, base64-of-inlined-html)
         cache = {}        # url -> data URI (shared across pages, fetch once)
@@ -1996,6 +2043,10 @@ class Harvester:
             return re.sub(r'url\(([^)]+)\)', repl, css)
 
         soup = BeautifulSoup(html, "html.parser")
+        # The page's own <base href> is removed below, so resolve against it.
+        base_tag = soup.find("base", href=True)
+        if base_tag:
+            url = urljoin(url, base_tag["href"].strip())
         for junk in soup(["script", "noscript", "base"]):
             junk.decompose()
 
@@ -2045,11 +2096,14 @@ class Harvester:
             el["style"] = inline_css(el["style"], url)
 
         for a in soup.find_all("a", href=True):
-            absu = urljoin(url, a["href"]).split("#")[0]
+            full = urljoin(url, a["href"])
+            absu = normalize_url(full)
             if absu in url_to_index:
                 a["href"] = "#"
                 a["data-mirror"] = str(url_to_index[absu])
-            elif a["href"].startswith(("http://", "https://")):
+            elif full.startswith(("http://", "https://")):
+                # Absolute, or a relative link is dead inside the srcdoc frame.
+                a["href"] = full
                 a["target"] = "_blank"
                 a["rel"] = "noopener noreferrer"
 
@@ -2066,7 +2120,10 @@ class Harvester:
                 i, escape(t or ("Page " + str(i + 1))))
             for i, (t, _b) in enumerate(entries))
         pages_js = "[" + ",".join(
-            '{"t":%s,"b":"%s"}' % (json.dumps(t or ("Page " + str(i + 1))), b)
+            '{"t":%s,"b":"%s"}' % (
+                # "<" escaped: a title holding "</script>" would otherwise end
+                # the shell's script block and run as markup.
+                json.dumps(t or ("Page " + str(i + 1))).replace("<", "\\u003c"), b)
             for i, (t, b) in enumerate(entries)) + "]"
 
         # Single-pass fill so page titles/content can never collide with a token.

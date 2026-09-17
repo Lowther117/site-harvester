@@ -63,7 +63,11 @@ def _report(exc):
                 sys.version.replace("\n", " "), sys.executable, text))
     except Exception:
         path = "(could not be written)"
-    sys.stderr.write(text)
+    if sys.stderr is not None:          # None in a windowed build
+        try:
+            sys.stderr.write(text)
+        except Exception:
+            pass
     try:
         import tkinter as tk
         from tkinter import messagebox
@@ -138,6 +142,8 @@ def selftest():
         # Playwright's browser is downloaded to a shared cache, not bundled;
         # importing site_harvester is what points the app at it.
         cache = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+        if cache == "0":        # "0" = the copy bundled inside playwright
+            cache = site_harvester._bundled_browsers() or cache
         if cache and os.path.isdir(cache):
             browsers = [d for d in os.listdir(cache)
                         if d.startswith("chromium")]

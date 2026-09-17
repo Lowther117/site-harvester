@@ -36,7 +36,15 @@ if [ ! -x "$VENV/bin/python" ]; then
     python3 -m venv "$VENV"
     "$VENV/bin/python" -m pip install --upgrade pip --quiet
     note "Installing libraries (yt-dlp, Playwright and friends)..."
-    "$VENV/bin/python" -m pip install -r requirements.txt --quiet
+    if ! "$VENV/bin/python" -m pip install -r requirements.txt --quiet; then
+        # A half-built environment would pass the check above next time and
+        # this step would never run again - remove it so the next launch retries.
+        rm -rf "$VENV"
+        say "The libraries did not install (is the internet connected?)"
+        note "Nothing was left behind - just open this again to retry."
+        read -r -p "Press Return to close." _
+        exit 1
+    fi
 fi
 
 # Playwright keeps its own cache and returns straight away when Chromium is
