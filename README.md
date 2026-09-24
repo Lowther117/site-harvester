@@ -56,7 +56,8 @@ So there are no surprises:
 | ffmpeg (optional) | portable copy downloaded into `tools\` | `brew install ffmpeg` |
 
 Nothing needs administrator permission and nothing goes on your PATH. On Windows
-everything lands inside this folder, so deleting the folder removes all of it.
+the Python environment and ffmpeg land inside this folder, so deleting the
+folder removes them; Chromium sits in Playwright's own cache (see the table).
 
 ffmpeg is genuinely optional — without it everything works except embedded and
 best-quality video, so a failure there is a note rather than a stop. On macOS it
