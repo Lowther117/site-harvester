@@ -2,10 +2,11 @@
 """
 Site Harvester
 A desktop app for Windows and macOS (Linux works but is not a supported
-target) that crawls a website and downloads
-every file it can find (documents, images, videos, audio, archives, and anything
-else), sorting the results into folders by file type — and optionally saves a
-single, clickable PDF copy of every page it visits.
+target) that crawls one or more websites (several at once if asked) and
+downloads every file it can find (documents, images, videos, audio, archives,
+and anything else), sorting the results into folders by file type — and
+optionally saves a single, clickable PDF copy and/or a single-file offline
+mirror of every page it visits.
 
 GUI: Tkinter (bundled with Python, nothing extra to install for the interface)
 Crawling/parsing: requests + beautifulsoup4
@@ -324,6 +325,17 @@ def looks_like_media(url):
     low = url.lower()
     return any(host in low for host in MEDIA_CDNS)
 
+
+def is_media_cdn(host):
+    """True if a hostname is one of the known media CDNs (or sits under one,
+    e.g. d1abc.cloudfront.net). Unlike looks_like_media() this matches the
+    host on its own, so "cloudfront.net" buried in a query string does not
+    count."""
+    host = (host or "").lower().strip().rstrip(".")
+    if not host:
+        return False
+    return any(host == cdn or host.endswith("." + cdn) for cdn in MEDIA_CDNS)
+
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -383,6 +395,18 @@ def base_domain(host):
     if len(parts) >= 2:
         return ".".join(parts[-2:])
     return host
+
+
+def same_site(host_a, host_b):
+    """True if two hostnames belong to the same registered site: identical,
+    or one is a subdomain of the other's registrable domain. "www." and a
+    port are ignored, so www.example.com, cdn.example.com and
+    example.com:8080 are all the same site, and bbc.co.uk is not the same
+    site as itv.co.uk (see TWO_PART_SUFFIXES). An IP address only matches
+    itself."""
+    a = base_domain(host_a)
+    b = base_domain(host_b)
+    return bool(a) and a == b
 
 
 def normalize_url(url):
@@ -773,7 +797,8 @@ class Harvester:
     def __init__(self, start_url, max_depth, wanted_categories,
                  grab_other, out_dir, scope, make_pdf, use_ytdlp,
                  use_render, log_q, stop_event, tag="s1", site_label=None,
-                 make_mirror=False):
+                 make_mirror=False, allow_any_media_host=False,
+                 abort_event=None):
         self.start_url = normalize_url(start_url)
         self.max_depth = max_depth
         self.wanted = wanted_categories
@@ -781,11 +806,22 @@ class Harvester:
         self.scope = scope
         self.make_pdf = make_pdf
         self.make_mirror = make_mirror
+        # In "stay on this domain" mode media is normally kept to the site's
+        # own hosts plus the known media CDNs; this switches that check off.
+        self.allow_any_media_host = allow_any_media_host
         # yt-dlp only matters if the user is collecting videos at all.
         self.use_ytdlp = use_ytdlp and ("Videos" in wanted_categories)
         self.render = use_render
         self.log_q = log_q
+        # Two levels of stopping. stop_event is the graceful one: nothing new
+        # starts, but a file already streaming is finished and kept.
+        # abort_event is the hard one: streaming files are cut off and their
+        # partial copies removed. The UI sets stop first and abort on a
+        # second click; closing the window sets both.
         self.stop_event = stop_event
+        self.abort_event = abort_event if abort_event is not None else threading.Event()
+        self._in_flight = 0            # files currently streaming to disk
+        self._offsite_hosts = set()    # hosts already reported as skipped
         # Identity used to tag messages so the UI can group them per site
         # when several sites are being crawled at once.
         self.tag = tag
@@ -819,6 +855,7 @@ class Harvester:
         self.downloaded = set()
 
         host = urlparse(start_url).netloc
+        self.start_host = urlparse(self.start_url).hostname or host
         self.start_base = base_domain(host)
         self.site_name = safe_dirname(host)
         # All files + the PDF live in a folder named after the site.
@@ -855,7 +892,12 @@ class Harvester:
             "pages": len(self.visited_pages),
             "queued": self.queue_size,
             "files": self.file_total,
+            "finishing": self._in_flight,
         }))
+
+    def stopping(self):
+        """True once nothing new should start - a graceful Stop or an abort."""
+        return self.stop_event.is_set() or self.abort_event.is_set()
 
     def wants(self, ext):
         cat = category_for_ext(ext)
@@ -865,6 +907,32 @@ class Harvester:
             return self.grab_other
         return cat in self.wanted
 
+    # ---- which hosts media may come from --------------------------------- #
+    def host_allowed(self, host):
+        """Whether a file on this host may be downloaded. In "anywhere" scope,
+        or with "allow media from any host" ticked, everything is. Otherwise
+        the host must be the site itself (or a subdomain of it) or one of the
+        known media CDNs - the legitimate reason for media to live off-site.
+        Pages are gated separately by _is_crawlable(); this is what stops the
+        tracking pixels, badges and third-party embeds a page links to."""
+        if self.scope != "domain" or self.allow_any_media_host:
+            return True
+        return same_site(host, self.start_host) or is_media_cdn(host)
+
+    def media_allowed(self, url):
+        """host_allowed() for a media URL, saying so in the log the first time
+        a host is refused - once per host, not once per file."""
+        if not url.lower().startswith(("http://", "https://")):
+            return True     # data:/blob:/mailto: - _download() drops these quietly
+        host = urlparse(url).hostname or ""
+        if self.host_allowed(host):
+            return True
+        if host not in self._offsite_hosts:
+            self._offsite_hosts.add(host)
+            self.log(f"   (skipping off-site media from {host or '?'} - tick "
+                     "'Allow media from any host' to include it)")
+        return False
+
     # ---- main entry ------------------------------------------------------- #
     def run(self):
         try:
@@ -872,11 +940,26 @@ class Harvester:
             depth_label = "unlimited" if self.max_depth == -1 else self.max_depth
             self.log(f"Starting on {self.start_url}")
             self.log(f"Scope: {self.scope} | Max depth: {depth_label}")
+            if self.scope == "domain":
+                self.log("Media from: " + (
+                    "any host" if self.allow_any_media_host
+                    else "this site and known media CDNs only"))
             self.log(f"Saving into: {self.site_dir}")
             self.log("-" * 48)
             self._crawl()
 
-            if not self.stop_event.is_set():
+            # A graceful Stop ends the crawl but not the run: the PDF and the
+            # mirror are still built from whatever was collected, because
+            # losing them is the last thing anyone stopping a long crawl
+            # wants. A second click (abort) skips them. A Stop that arrives
+            # DURING one of those builds finishes the page in hand and then
+            # stops taking pages - see _post_step_cancelled().
+            self._stopped_before_post = self.stop_event.is_set()
+            if not self.abort_event.is_set():
+                if self._stopped_before_post and self.pages and (
+                        self.make_pdf or self.make_mirror):
+                    self.log(f"Building the PDF/mirror from the {len(self.pages)} "
+                             "page(s) collected so far - click Stop again to skip.")
                 if self.make_pdf:
                     self._build_pdf()
                 if self.make_mirror:
@@ -884,12 +967,14 @@ class Harvester:
 
             total = sum(self.counts.values())
             self.log("-" * 48)
+            ended = ("Aborted." if self.abort_event.is_set()
+                     else "Stopped." if self.stop_event.is_set() else "Done.")
             if self.counts:
                 summary = ", ".join(f"{k}: {v}" for k, v in sorted(self.counts.items()))
-                self.log(f"Done. Visited {len(self.visited_pages)} page(s), "
+                self.log(f"{ended} Visited {len(self.visited_pages)} page(s), "
                          f"downloaded {total} file(s) — {summary}")
             else:
-                self.log(f"Done. Visited {len(self.visited_pages)} page(s). "
+                self.log(f"{ended} Visited {len(self.visited_pages)} page(s). "
                          "No matching files were found.")
         except Exception as e:
             self.log(f"ERROR: {e}")
@@ -904,8 +989,8 @@ class Harvester:
         queued = {self.start_url}
 
         while q:
-            if self.stop_event.is_set():
-                self.log("Stopped.")
+            if self.stopping():
+                self.log("Stopped crawling - no more pages will be visited.")
                 return
             url, depth = q.popleft()
             self.queue_size = len(q)
@@ -1061,9 +1146,11 @@ class Harvester:
             page.on("response", _on_response)
             page.goto(url, wait_until="load", timeout=30000)
 
-            # Scroll to trigger lazy-loaded images / infinite content.
+            # Scroll to trigger lazy-loaded images / infinite content. A
+            # graceful Stop lets the page in hand finish; only an abort cuts
+            # the scrolling short.
             for _ in range(8):
-                if self.stop_event.is_set():
+                if self.abort_event.is_set():
                     break
                 page.mouse.wheel(0, 5000)
                 page.wait_for_timeout(400)
@@ -1166,6 +1253,12 @@ class Harvester:
         page_links = set()
         self._collect(base, soup, media, page_links)
 
+        # Embedded players and streams are judged by the page hosting them,
+        # not by the player's own host (YouTube, Vimeo and the like are always
+        # off-site). Normally true - a page only gets here through
+        # _is_crawlable() - unless a redirect carried it off the site.
+        page_ok = self.host_allowed(urlparse(final).hostname or "")
+
         # Some builders (GoDaddy, etc.) embed the real page inside an iframe
         # 'srcdoc' attribute — parse that as its own document.
         for iframe in soup.find_all("iframe"):
@@ -1174,7 +1267,8 @@ class Harvester:
                 try:
                     inner = BeautifulSoup(sd, "html.parser")
                     self._collect(base, inner, media, page_links)
-                    self._scan_for_embeds(base, inner)
+                    if page_ok:
+                        self._scan_for_embeds(base, inner)
                 except Exception:
                     pass
 
@@ -1185,13 +1279,23 @@ class Harvester:
             if looks_like_media(u):
                 media.add(u)
 
-        # Act on each media URL.
+        # Act on each media URL. In "stay on this domain" mode a file is only
+        # fetched from the site's own hosts or a known media CDN; a stream
+        # manifest (.m3u8/.mpd) is judged by the page it was found on instead,
+        # like an embedded player, because a stream always lives on some
+        # video CDN and that is not a reason to lose it.
         for u in media:
-            if self.stop_event.is_set():
+            if self.stopping():
                 return set()
             ext = find_media_ext(u)
             if self.use_ytdlp and (ext in VIDEO_EXTS):
-                self._grab_video(u)
+                if ext in STREAM_EXTS:
+                    if page_ok:
+                        self._grab_video(u)
+                elif self.media_allowed(u):
+                    self._grab_video(u)
+            elif not self.media_allowed(u):
+                continue
             elif ext in CATEGORIES["Videos"] and not self.use_ytdlp:
                 self._download(u, ext)
             else:
@@ -1200,7 +1304,8 @@ class Harvester:
                 self._download(u, ext or None)
 
         # Embedded players / HTML5 video on the main page.
-        self._scan_for_embeds(base, soup)
+        if page_ok:
+            self._scan_for_embeds(base, soup)
 
         return page_links
 
@@ -1290,14 +1395,8 @@ class Harvester:
                 i += 1
 
             partial = dest
-            with open(_fs(dest), "wb") as f:
-                for chunk in r.iter_content(chunk_size=65536):
-                    if self.stop_event.is_set():
-                        f.close()
-                        os.remove(_fs(dest))
-                        return
-                    if chunk:
-                        f.write(chunk)
+            if not self._stream_to(r, dest):
+                return
             partial = None
             self.counts[cat] = self.counts.get(cat, 0) + 1
             self.file_total += 1
@@ -1308,6 +1407,31 @@ class Harvester:
             self._discard_partial(partial)
         finally:
             r.close()
+
+    def _stream_to(self, resp, dest):
+        """Write a streaming response to dest. Returns False, with the partial
+        file removed, if an abort arrives part-way through. A graceful Stop
+        deliberately does NOT interrupt this: the UI promises that files
+        already downloading are finished and kept, so only abort_event is
+        checked here. The in-flight count is what the status line shows as
+        "still finishing" while a graceful Stop waits."""
+        self._in_flight += 1
+        self.status()
+        try:
+            with open(_fs(dest), "wb") as f:
+                for chunk in resp.iter_content(chunk_size=65536):
+                    if self.abort_event.is_set():
+                        f.close()
+                        os.remove(_fs(dest))
+                        self.log(f"   ✗ aborted, partial file removed: "
+                                 f"{os.path.basename(dest)}")
+                        return False
+                    if chunk:
+                        f.write(chunk)
+            return True
+        finally:
+            self._in_flight -= 1
+            self.status()
 
     def _discard_partial(self, path):
         """A download that broke half-way must not be left looking complete."""
@@ -1360,14 +1484,8 @@ class Harvester:
                 dest = f"{b}_{i}{x}"
                 i += 1
             partial = dest
-            with open(_fs(dest), "wb") as f:
-                for chunk in resp.iter_content(chunk_size=65536):
-                    if self.stop_event.is_set():
-                        f.close()
-                        os.remove(_fs(dest))
-                        return
-                    if chunk:
-                        f.write(chunk)
+            if not self._stream_to(resp, dest):
+                return
             partial = None
             self.counts[cat] = self.counts.get(cat, 0) + 1
             self.file_total += 1
@@ -1415,7 +1533,8 @@ class Harvester:
             "concurrent_fragment_downloads": 4,
             # Stop used to have no effect on a video already downloading -
             # a long one kept the whole run alive for minutes. Raising from
-            # a progress hook is yt-dlp's supported way to abort.
+            # a progress hook is yt-dlp's supported way to abort. Only the
+            # hard abort does that; a graceful Stop lets the video finish.
             "progress_hooks": [self._ydl_progress],
         }
         if ffmpeg_dir:
@@ -1425,13 +1544,13 @@ class Harvester:
         return self._ydl
 
     def _ydl_progress(self, d):
-        if self.stop_event.is_set():
+        if self.abort_event.is_set():
             from yt_dlp.utils import DownloadCancelled
-            raise DownloadCancelled("Stopped by user")
+            raise DownloadCancelled("Aborted by user")
 
     def _grab_video(self, src):
         """Download one video (page, embed, or stream URL) at best quality."""
-        if self.stop_event.is_set():
+        if self.stopping():
             return
         key = src.split("#")[0]
         if key in self._video_seen:
@@ -1443,11 +1562,16 @@ class Harvester:
             return
 
         self.log(f"   ↓ checking for video: {src}")
+        self._in_flight += 1
+        self.status()
         try:
             info = ydl.extract_info(src, download=True)
         except Exception as e:
             self.log(f"   ✗ video failed: {src} — {e}")
             return
+        finally:
+            self._in_flight -= 1
+            self.status()
         if not info:
             return  # nothing downloadable there — ignore quietly
 
@@ -1459,11 +1583,11 @@ class Harvester:
 
     def _scan_for_embeds(self, url, soup):
         """Find embedded/streaming videos on a page and pull them via yt-dlp."""
-        if not self.use_ytdlp or self.stop_event.is_set():
+        if not self.use_ytdlp or self.stopping():
             return
         # Embedded players (YouTube/Vimeo/etc.) in iframes.
         for iframe in soup.find_all("iframe", src=True):
-            if self.stop_event.is_set():
+            if self.stopping():
                 return
             src = urljoin(url, iframe["src"])
             if any(h in src for h in VIDEO_EMBED_HOSTS):
@@ -1474,6 +1598,16 @@ class Harvester:
             self._grab_video(url)
 
     # ---- combined navigable PDF ------------------------------------------ #
+    def _post_step_cancelled(self):
+        """Whether the PDF/mirror build should stop taking pages. An abort
+        always ends it (and nothing is written). A graceful Stop only counts
+        if it arrived after the build began - one that arrived during the
+        crawl is the reason the build is running at all - and then the page
+        in hand is finished and what has been printed so far is still saved."""
+        if self.abort_event.is_set():
+            return True
+        return self.stop_event.is_set() and not getattr(self, "_stopped_before_post", False)
+
     def _write_pdf_debug(self, message):
         """Leave a small note next to the output saying which PDF engine ran and
         why — makes it easy to see whether the printed-page path worked."""
@@ -1545,11 +1679,17 @@ class Harvester:
         self.log("(each page is loaded live and printed — heavy sites take a moment per page)")
         parts = []   # (title, url, pdf_bytes)
         toc = None   # the printed contents page, once the parts exist
+        cut_short = False
         try:
             for i, (url, html) in enumerate(self.pages):
-                if self.stop_event.is_set():
-                    self.log("PDF cancelled.")
-                    return
+                if self._post_step_cancelled():
+                    if self.abort_event.is_set():
+                        self.log("PDF abandoned (aborted).")
+                        return
+                    cut_short = True
+                    self.log(f"PDF: stopped early - keeping the {len(parts)} "
+                             f"of {len(self.pages)} page(s) printed so far.")
+                    break
                 title = self._page_title(html) or url
                 self.log(f"   • rendering [{i + 1}/{len(self.pages)}] {title[:56]}…")
                 data = self._page_pdf_bytes(url, html)
@@ -1560,7 +1700,7 @@ class Harvester:
             # The contents page: printed like any other page, and its links
             # are ordinary <a href="page url"> so the same rewiring that
             # handles the site's own links turns them into in-PDF jumps.
-            if parts and not self.stop_event.is_set():
+            if parts and not self.abort_event.is_set():
                 toc = self._page_pdf_bytes(None, self._toc_html(parts))
                 if not toc:
                     self.log("      ✗ could not print the contents page")
@@ -1573,6 +1713,9 @@ class Harvester:
             self._pdf_ctx = None
             self._pdf_page = None
 
+        if self.abort_event.is_set():
+            self.log("PDF abandoned (aborted).")
+            return
         if not parts:
             self.log("   ✗ PDF build failed: no pages could be printed.")
             return
@@ -1581,7 +1724,8 @@ class Harvester:
         try:
             self._merge_pdfs(PdfReader, PdfWriter, parts, dest, toc)
             self.log(f"   ✓ PDF saved: {os.path.basename(dest)} "
-                     f"({len(parts)} page(s), clickable index)")
+                     f"({len(parts)} page(s), clickable index"
+                     f"{', stopped early' if cut_short else ''})")
         except Exception as e:
             self.log(f"   ✗ PDF build failed: {e}")
 
@@ -1692,7 +1836,7 @@ class Harvester:
                 # A short scroll pulls in lazy images without a long wait.
                 try:
                     for _ in range(3):
-                        if self.stop_event.is_set():
+                        if self.abort_event.is_set():
                             break
                         page.mouse.wheel(0, 3000)
                         page.wait_for_timeout(120)
@@ -1841,9 +1985,13 @@ class Harvester:
         toc_items = []
         sections = []
         for i, (url, html) in enumerate(self.pages):
-            if self.stop_event.is_set():
-                self.log("PDF cancelled.")
-                return
+            if self._post_step_cancelled():
+                if self.abort_event.is_set():
+                    self.log("PDF abandoned (aborted).")
+                    return
+                self.log(f"PDF: stopped early - keeping the {len(sections)} "
+                         f"of {len(self.pages)} page(s) laid out so far.")
+                break
             anchor = f"page-{i + 1}"
             soup = BeautifulSoup(html, "html.parser")
             title = ""
@@ -1901,6 +2049,10 @@ class Harvester:
             "</body></html>"
         )
 
+        if self.abort_event.is_set() or not sections:
+            self.log("PDF abandoned (aborted)." if self.abort_event.is_set()
+                     else "   ✗ PDF build failed: no pages could be laid out.")
+            return
         dest = os.path.join(self.site_dir, f"{self.site_name}-pages.pdf")
         try:
             HTML(string=document, base_url=self.start_url).write_pdf(dest)
@@ -1934,6 +2086,7 @@ class Harvester:
 
         entries = []      # (title, base64-of-inlined-html)
         cache = {}        # url -> data URI (shared across pages, fetch once)
+        cut_short = False
         ctx = None
         try:
             ctx = browser.new_context(user_agent=USER_AGENT,
@@ -1942,9 +2095,14 @@ class Harvester:
             page.set_default_timeout(20000)
             import base64
             for i, (url, html) in enumerate(self.pages):
-                if self.stop_event.is_set():
-                    self.log("Mirror cancelled.")
-                    return
+                if self._post_step_cancelled():
+                    if self.abort_event.is_set():
+                        self.log("Mirror abandoned (aborted).")
+                        return
+                    cut_short = True
+                    self.log(f"Mirror: stopped early - keeping the {len(entries)} "
+                             f"of {len(self.pages)} page(s) captured so far.")
+                    break
                 title = self._page_title(html) or url
                 loaded = False
                 try:
@@ -1956,7 +2114,7 @@ class Harvester:
                     self._dismiss_overlays(page)
                     try:
                         for _ in range(3):
-                            if self.stop_event.is_set():
+                            if self.abort_event.is_set():
                                 break
                             page.mouse.wheel(0, 3000)
                             page.wait_for_timeout(120)
@@ -1985,6 +2143,9 @@ class Harvester:
             except Exception:
                 pass
 
+        if self.abort_event.is_set():
+            self.log("Mirror abandoned (aborted).")
+            return
         if not entries:
             self.log("   ✗ Mirror build failed: no pages captured.")
             return
@@ -1996,7 +2157,8 @@ class Harvester:
                 f.write(document)
             size_mb = os.path.getsize(dest) / 1048576.0
             self.log(f"   ✓ Mirror saved: {os.path.basename(dest)} "
-                     f"({len(entries)} page(s), {size_mb:.1f} MB)")
+                     f"({len(entries)} page(s), {size_mb:.1f} MB"
+                     f"{', stopped early' if cut_short else ''})")
         except Exception as e:
             self.log(f"   ✗ Mirror build failed: {e}")
 
@@ -2147,20 +2309,28 @@ class BatchRunner:
         ("batch_done", None, {"done": N, "total": M})      # whole batch finished
     """
 
-    def __init__(self, sites, concurrency, common, log_q, stop_event):
+    def __init__(self, sites, concurrency, common, log_q, stop_event,
+                 abort_event=None):
         # sites: list of (tag, url, label)
         self.sites = sites
         self.concurrency = max(1, int(concurrency))
         self.common = common          # shared Harvester kwargs (dict)
         self.log_q = log_q
+        # Graceful stop (no new sites, pages or downloads) and hard abort
+        # (cut off in-flight downloads too) - see Harvester.__init__.
         self.stop_event = stop_event
+        self.abort_event = abort_event if abort_event is not None else threading.Event()
+
+    def _stopping(self):
+        return self.stop_event.is_set() or self.abort_event.is_set()
 
     def _run_one(self, tag, url, label, sem):
         try:
             self.log_q.put(("site_start", tag, {"url": url, "label": label}))
             harvester = Harvester(
                 start_url=url, tag=tag, site_label=label,
-                log_q=self.log_q, stop_event=self.stop_event, **self.common)
+                log_q=self.log_q, stop_event=self.stop_event,
+                abort_event=self.abort_event, **self.common)
             harvester.run()
         except Exception as e:
             self.log_q.put(("log", tag, f"ERROR: {e}"))
@@ -2173,10 +2343,10 @@ class BatchRunner:
         threads = []
         started = 0
         for tag, url, label in self.sites:
-            if self.stop_event.is_set():
+            if self._stopping():
                 break
             sem.acquire()               # wait for a free slot
-            if self.stop_event.is_set():
+            if self._stopping():
                 sem.release()
                 break
             t = threading.Thread(
@@ -2205,7 +2375,11 @@ class App(tk.Tk):
         self.minsize(min(640, avail_w), min(760, avail_h))
 
         self.log_q = queue.Queue()
+        # First click on Stop sets stop_event (graceful: finish what is
+        # downloading, start nothing new); a second click sets abort_event
+        # (cut in-flight downloads off and remove their partial files).
         self.stop_event = threading.Event()
+        self.abort_event = threading.Event()
         self.worker = None
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -2225,10 +2399,11 @@ class App(tk.Tk):
         self.after(100, self._drain_log)
 
     def _on_close(self):
-        """Closing the window mid-run: tell the workers to stop so partial
+        """Closing the window mid-run: tell the workers to abort so partial
         downloads are removed and the headless browser is shut down, give
         them a moment, then go."""
         self.stop_event.set()
+        self.abort_event.set()
         worker = self.worker
         if worker is not None and worker.is_alive():
             try:
@@ -2381,6 +2556,13 @@ class App(tk.Tk):
         ttk.Checkbutton(main,
                         text="Render JavaScript first — slower, but catches sites that load content dynamically",
                         variable=self.render_var).pack(anchor="w", padx=12, pady=(2, 0))
+        # Off by default: in "stay on this domain" mode files are only taken
+        # from the site's own hosts and the known media CDNs, which keeps
+        # tracking pixels, badges and third-party embeds out of the folders.
+        self.any_media_host_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(main,
+                        text="Allow media from any host (otherwise only this site's own hosts and known media CDNs)",
+                        variable=self.any_media_host_var).pack(anchor="w", padx=12, pady=(2, 0))
 
         ttk.Label(main, text="Save to folder").pack(anchor="w", **pad)
         out_frame = ttk.Frame(main)
@@ -2497,10 +2679,16 @@ class App(tk.Tk):
         pages = sum(s.get("pages", 0) for s in self.site_status.values())
         queued = sum(s.get("queued", 0) for s in self.site_status.values())
         files = sum(s.get("files", 0) for s in self.site_status.values())
+        finishing = sum(s.get("finishing", 0) for s in self.site_status.values())
         running = max(0, self.sites_started - self.sites_done)
+        lead = f"Sites: {self.sites_done}/{self.total_sites} done · {running} running"
+        if self.abort_event.is_set():
+            lead = "Aborting…"
+        elif self.stop_event.is_set():
+            lead = (f"Stopping — {finishing} file(s) still finishing" if finishing
+                    else "Stopping — nothing left in flight")
         self.status_var.set(
-            f"Sites: {self.sites_done}/{self.total_sites} done · {running} running"
-            f"     |     Pages: {pages}  ·  Queue: {queued}  ·  Files: {files}"
+            f"{lead}     |     Pages: {pages}  ·  Queue: {queued}  ·  Files: {files}"
         )
 
     def _drain_log(self):
@@ -2594,29 +2782,53 @@ class App(tk.Tk):
             make_mirror=self.mirror_var.get(),
             use_ytdlp=self.ytdlp_var.get(),
             use_render=self.render_var.get(),
+            allow_any_media_host=self.any_media_host_var.get(),
         )
 
         self.stop_event.clear()
-        runner = BatchRunner(sites, concurrency, common, self.log_q, self.stop_event)
+        self.abort_event.clear()
+        runner = BatchRunner(sites, concurrency, common, self.log_q,
+                             self.stop_event, self.abort_event)
         self.worker = threading.Thread(target=runner.run, daemon=True)
         self.worker.start()
 
         self.start_btn.config(state="disabled")
-        self.stop_btn.config(state="normal")
+        self.stop_btn.config(state="normal", text="Stop")
         self.status_var.set("Working…")
         self.progress.start(12)
 
     def _stop(self):
-        self.stop_event.set()
-        self._append_log("Stopping… (finishing the current downloads first)")
+        """First click: graceful - nothing new starts, files already
+        downloading are finished and kept, and the PDF/mirror are still
+        built from what was collected. Second click: abort - in-flight
+        downloads are cut off and their partial files removed, and the
+        PDF/mirror are skipped."""
+        if not self.stop_event.is_set():
+            self.stop_event.set()
+            self.stop_btn.config(
+                text="Stopping… (finishing current files) — click again to abort")
+            self._append_log("Stopping — no new pages or downloads will start; "
+                             "files already downloading are being finished and kept. "
+                             "Click Stop again to abort those too.")
+            self._refresh_status()
+        elif not self.abort_event.is_set():
+            self.abort_event.set()
+            self.stop_btn.config(text="Aborting…", state="disabled")
+            self._append_log("Aborting — in-flight downloads are being cut off and "
+                             "their partial files removed; the PDF/mirror are skipped.")
+            self._refresh_status()
 
     def _finished(self, payload=None):
         self.start_btn.config(state="normal")
-        self.stop_btn.config(state="disabled")
+        self.stop_btn.config(state="disabled", text="Stop")
         self.progress.stop()
         if payload:
             total = payload.get("total", self.total_sites)
-            if self.stop_event.is_set():
+            if self.abort_event.is_set():
+                self._append_log("=" * 48)
+                self._append_log(f"Aborted. {self.sites_done} of {total} site(s) finished.")
+                self.status_var.set(f"Aborted — {self.sites_done}/{total} site(s) finished.")
+            elif self.stop_event.is_set():
                 self._append_log("=" * 48)
                 self._append_log(f"Stopped. {self.sites_done} of {total} site(s) finished.")
                 self.status_var.set(f"Stopped — {self.sites_done}/{total} site(s) finished.")

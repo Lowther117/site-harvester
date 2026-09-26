@@ -1,10 +1,12 @@
 # Site Harvester
 
 A desktop app for **Windows and macOS** (Linux works but isn't a supported
-target) that takes a website address, lets you
-pick how much of the site to scan and which file types to grab, then downloads
-everything it finds into tidy folders (Images, Videos, Documents, Audio,
-Archives — and an "Other" folder that adapts to any file extension it runs into).
+target) that takes one or more website addresses, lets you pick how much of
+each site to scan and which file types to grab, then downloads everything it
+finds into tidy folders (Images, Videos, Documents, Audio, Archives — and an
+"Other" folder that adapts to any file extension it runs into). It can also
+save each site as one clickable PDF and/or one self-contained offline HTML
+mirror, and it will crawl several sites at the same time.
 
 > **Before you point it at anything:** this crawler does not consult or obey
 > `robots.txt`, and it does not pause between requests. It also sends a
@@ -127,48 +129,119 @@ to itself.
 
 ## How to use it
 
-1. Open Site Harvester.
-2. Paste the website address (e.g. `https://example.com`).
-3. Pick **how deep to crawl** from the dropdown:
+The window is one column of controls, top to bottom:
+
+1. **Website addresses (one per line)** — paste one address per line (e.g.
+   `https://example.com`). `https://` is added if you leave it off, blank
+   lines and duplicates are ignored. One line is one site; several lines is a
+   batch (see "Several sites at once").
+2. **How deep to crawl**:
    - *Just this page* — only files linked on that one page
    - *1 / 2 / 3 / 5 levels deep* — follows links that many steps out
+     (2 is the default)
    - *Entire site* — follows every reachable link (slowest, most complete)
-4. Pick **which links to follow**:
+3. **Sites at the same time** — `1` (the default) crawls the batch one site
+   after another; `2`–`8` run that many sites in parallel, each with its own
+   crawler and its own output folder. Irrelevant with a single address.
+4. **Which links to follow**:
    - *Stay on this domain* — keeps to the site you entered, including its `www`
-     and other subdomains (recommended)
+     and other subdomains (recommended). In this mode files are also only
+     taken from the site's own hosts and known media CDNs — see "Where media
+     may come from".
    - *Follow links to other websites too* — will hop onto external sites it finds
      (can grow large fast — best paired with a shallow depth)
-5. Tick the file types you want. Leave "Also grab any other file type" on if you
-   want it to catch anything unexpected too.
-6. Leave **"Also save one clickable PDF of every page visited"** on if you want a
-   single navigable PDF of the whole crawl (see below).
-   Leave **"Use yt-dlp for embedded & streaming videos"** on to grab videos that
-   aren't plain file links (see "Videos" below).
-7. Choose where to save (defaults to a `SiteHarvester` folder in your Downloads;
-   File → *Default save folder…* changes that for good, *Reset to Downloads* undoes it).
-8. Click **Start**. The **progress tracker** shows a running count of pages
-   scanned, pages still queued, and files saved, with an animated bar while it
-   works. The **activity log** shows each page as it visits it (with its depth)
-   and every file as it saves. Use **Stop** any time, and **Open folder** to see
-   the results.
+5. **File types to collect** — tick Images, Videos, Documents, Audio, Archives
+   as wanted (all on by default).
+6. **Also grab any other file type** — catches anything with an extension the
+   five groups don't cover, sorted into `Other/<extension>/`. On by default.
+7. **Also save one clickable PDF of every page visited** — one navigable PDF
+   per site (see "The combined PDF"). On by default.
+8. **Also save a single-file offline mirror** — one `.html` per site that you
+   can open and browse with no internet (see "The offline mirror"). Off by
+   default; it can get large.
+9. **Use yt-dlp for embedded & streaming videos** — grabs videos that aren't
+   plain file links (see "Videos"). On by default.
+10. **Render JavaScript first** — opens each page in a headless browser before
+    reading it (see "How it finds files"). Off by default; slower.
+11. **Allow media from any host** — switches off the media host check in
+    *Stay on this domain* mode, so off-site images, badges and embeds are
+    downloaded too (see "Where media may come from"). Off by default.
+12. **Save to folder** — where the per-site folders go. Defaults to a
+    `SiteHarvester` folder in your Downloads; **Choose…** picks another for
+    this run, and File → *Default save folder…* changes the default for good
+    (*Reset to Downloads* undoes it).
+13. **Start / Stop / Open folder** — Start begins the run; Stop is a
+    two-stage stop (see "Stopping"); Open folder shows the save folder.
 
-Everything is saved into a folder named after the website. Files are sorted like
-this:
+Below the buttons an animated bar runs while it works, and the **status line**
+shows sites done / running, pages scanned, pages still queued, and files saved
+(totals across every site in the batch). The **activity log** shows each page
+as it is visited (with its depth) and every file as it saves; with more than
+one site running each line is prefixed with the site it belongs to. It keeps
+the last 4,000 lines.
+
+The **View** menu has Dark mode (`Ctrl+D`); the choice is remembered. The
+other crawl options start from their defaults every time the app opens.
+
+Everything is saved into a folder named after the website — one per address
+in the batch. Files are sorted like this:
 
 ```
 SiteHarvester/
-└── example.com/                 (a folder per website you pull)
-    ├── example.com-pages.pdf     (the combined clickable PDF)
-    ├── Images/
-    ├── Videos/
-    ├── Documents/
-    ├── Audio/
-    ├── Archives/
-    └── Other/
-        ├── json/
-        ├── xml/
-        └── ...                   (a subfolder per unexpected extension)
+├── example.com/                  (a folder per website you pull)
+│   ├── example.com-pages.pdf     (the combined clickable PDF, if ticked)
+│   ├── example.com-mirror.html   (the single-file offline mirror, if ticked)
+│   ├── Images/
+│   ├── Videos/
+│   ├── Documents/
+│   ├── Audio/
+│   ├── Archives/
+│   └── Other/
+│       ├── json/
+│       ├── xml/
+│       └── ...                   (a subfolder per unexpected extension)
+└── another-site.org/             (the next address in the batch)
 ```
+
+A file whose name is already taken gets `_1`, `_2`, … added. If the PDF had
+to fall back to the basic engine there is also a `_pdf_engine.txt` note in
+the site folder saying why.
+
+## Several sites at once
+
+Put one address per line in the box and click Start. Every site gets its own
+crawler, its own `<site>/` folder, and its own PDF/mirror; all the other
+settings (depth, scope, file types, options) apply to every site in the batch.
+**Sites at the same time** says how many crawlers run in parallel: `1` works
+through the list in order, `2`–`8` keep that many going at once and start the
+next site as soon as one finishes. The status line and the log cover the whole
+batch, with each log line prefixed `[site]` so the interleaved output stays
+readable.
+
+Running several sites at once with **Render JavaScript first** on means that
+many headless browsers at once; it works, but it is heavy and occasionally
+flaky, so drop the count if you hit trouble.
+
+## Stopping
+
+Stop is two clicks:
+
+- **First click — graceful.** Nothing new starts: no more pages are visited
+  and no new downloads begin, on any site in the batch. Files that are already
+  downloading (including a video yt-dlp is in the middle of) run to completion
+  and are kept. The button changes to *Stopping… (finishing current files) —
+  click again to abort* and the status line shows how many files are still
+  finishing. If the PDF or mirror option is on, they are then still built from
+  the pages collected so far — stopping a long crawl shouldn't cost you the
+  PDF of everything it already read. A Stop that arrives while the PDF or
+  mirror is being built finishes the page in hand and then writes what it has.
+- **Second click — abort.** Downloads in flight are cut off and their partial
+  files deleted, yt-dlp is cancelled, and the PDF/mirror steps are skipped
+  (or abandoned, if one was running). This is also what closing the window
+  mid-run does.
+
+Either way the log says which happened and Start comes back when the workers
+have gone.
 
 ## Videos (yt-dlp)
 
@@ -191,10 +264,17 @@ log tells you how to add it (`brew install ffmpeg`).
 Note: yt-dlp is deliberately set to **not** pull entire channels or playlists —
 just the video on the page it's looking at.
 
+In *Stay on this domain* mode an embedded player or a stream is judged by the
+**page it sits on**, not by the video's own host — a YouTube embed on your
+site is your site's video even though it is served from youtube.com, and a
+stream manifest always lives on some video CDN. A plain video file link
+(`.mp4` and friends) is treated like any other file and follows the media host
+rule below.
+
 ## The combined PDF
 
-If the PDF option is on, Site Harvester saves every page it visited into a single
-`<website>-pages.pdf` with:
+If the PDF option is on, Site Harvester saves every page it visited on a site
+into a single `<website>-pages.pdf` (one per site in the batch) with:
 
 - a **table of contents** on the first page — click any entry to jump to that page
 - a **bookmark sidebar** (one bookmark per page) for navigating in Preview or any
@@ -215,6 +295,47 @@ that should never run. If you want it anyway:
 `pip install -r requirements-fallback.txt` (see that file for the system
 libraries each platform needs). Without it, a Chromium failure means the PDF is
 skipped and the log says why; downloading files is unaffected either way.
+
+## The offline mirror
+
+If the mirror option is on, Site Harvester also saves every page it visited on
+a site into one self-contained `<website>-mirror.html`. Double-click it and it
+opens in any browser with no internet and no folder of files beside it:
+
+- a **sidebar** listing every captured page (the ☰ Pages button hides it)
+- each page rendered by the headless browser, then its **CSS, images and
+  fonts inlined as `data:` URIs** so nothing is fetched from the network
+- the site's **own internal links rewired** to switch pages inside the mirror;
+  external links open in a new tab as normal
+- scripts stripped, and cookie/consent overlays hidden the same way as in the
+  PDF
+
+It is off by default because everything is inside the one file: a site with a
+lot of imagery makes a big `.html`. Anything over 8 MB per asset is left as
+its original link rather than inlined. Like the PDF, it needs the headless
+Chromium; if that can't start the mirror is skipped and the log says so. The
+mirror is built after the crawl, from the pages the crawl captured.
+
+## Where media may come from
+
+In *Stay on this domain* mode, pages have always been kept to the site you
+entered, but the **files** on those pages used to be downloaded from wherever
+they lived — which meant tracking pixels, third-party badges, social widgets
+and off-site embeds ended up in your `Images/` folder. Now a file is only
+downloaded from:
+
+- the site's own hosts — the same domain, its `www`, and any subdomain
+  (`cdn.example.com`, `static.example.com`); two-part country suffixes are
+  understood, so `shop.example.co.uk` belongs to `example.co.uk` and
+  `other.co.uk` does not
+- the known **media CDNs** that site builders serve their own images from
+  (Wix, Squarespace, Shopify, GoDaddy, Cloudinary, imgix, CloudFront and so on)
+
+Anything else is skipped, with one line in the log per skipped host (not per
+file) saying so. Tick **Allow media from any host** to switch the check off and
+get the old behaviour. *Follow links to other websites too* is unaffected —
+in that mode everything is fair game anyway. Embedded video is judged by the
+page it sits on, not the video host (see "Videos").
 
 ## How it finds files (works across most site builders)
 
@@ -250,10 +371,14 @@ rather than failing, and the log tells you how to install it
   light look and back; the choice is remembered in `site_harvester_ui.json`
   next to the app.
 - **Stay on this domain** is the default so it doesn't wander onto other sites.
-  Subdomains (`www.`, `blog.`, etc.) count as the same domain. Switch to *Follow
-  links to other websites too* only when you really want it to go off-site.
-- It only downloads files that are actually linked in the page's HTML. It can't
-  reach content that's hidden behind logins or loaded by heavy JavaScript.
+  Subdomains (`www.`, `blog.`, etc.) count as the same domain, for pages and
+  for files alike. Switch to *Follow links to other websites too* only when
+  you really want it to go off-site.
+- It only downloads files that are actually linked in the page's HTML (or, with
+  *Render JavaScript first*, that the page loads while it is open). It can't
+  reach content that's hidden behind a login.
+- The crawl options (depth, scope, file types, the tickboxes) are not
+  remembered between runs — only the theme and the default save folder are.
 - **It does not obey `robots.txt` and does not rate-limit itself.** There is no
   delay between requests, so a large crawl hits a server hard. Use it on sites
   you own or have permission to download from, be mindful of each site's terms
