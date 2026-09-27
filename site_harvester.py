@@ -384,6 +384,13 @@ def base_domain(host):
     host = (host or "").lower().strip()
     if "@" in host:
         host = host.rsplit("@", 1)[1]
+    # An IPv6 literal is all colons: "[::1]:8000" from a netloc, "::1" from
+    # urlparse().hostname. Splitting on ":" would leave "[" or "", so it is
+    # taken whole (like IPv4, an address has no "domain").
+    if host.startswith("["):
+        return host[1:].split("]", 1)[0]
+    if host.count(":") > 1:
+        return host
     host = host.split(":")[0]          # drop any port
     if host.startswith("www."):
         host = host[4:]
@@ -924,7 +931,13 @@ class Harvester:
         a host is refused - once per host, not once per file."""
         if not url.lower().startswith(("http://", "https://")):
             return True     # data:/blob:/mailto: - _download() drops these quietly
-        host = urlparse(url).hostname or ""
+        try:
+            host = urlparse(url).hostname or ""
+        except ValueError:
+            # A malformed address swept up from raw HTML ("http://[::1/x.jpg"
+            # style) - let _download() try and log the failure as it always
+            # has, rather than an exception here ending the whole site.
+            return True
         if self.host_allowed(host):
             return True
         if host not in self._offsite_hosts:
@@ -2304,7 +2317,7 @@ class BatchRunner:
 
         ("site_start", tag, {"url": ..., "label": ...})   # a site began
         ("log",        tag, message)                       # from that Harvester
-        ("status",     tag, {pages, queued, files})        # live counts
+        ("status",     tag, {pages, queued, files, finishing})  # live counts
         ("site_done",  tag, None)                          # a site finished
         ("batch_done", None, {"done": N, "total": M})      # whole batch finished
     """

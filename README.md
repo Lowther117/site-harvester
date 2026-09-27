@@ -236,9 +236,9 @@ Stop is two clicks:
   PDF of everything it already read. A Stop that arrives while the PDF or
   mirror is being built finishes the page in hand and then writes what it has.
 - **Second click — abort.** Downloads in flight are cut off and their partial
-  files deleted, yt-dlp is cancelled, and the PDF/mirror steps are skipped
-  (or abandoned, if one was running). This is also what closing the window
-  mid-run does.
+  files deleted, yt-dlp is cancelled (it may leave a `.part` file of its own
+  in `Videos/`), and the PDF/mirror steps are skipped (or abandoned, if one
+  was running). This is also what closing the window mid-run does.
 
 Either way the log says which happened and Start comes back when the workers
 have gone.
@@ -336,6 +336,11 @@ file) saying so. Tick **Allow media from any host** to switch the check off and
 get the old behaviour. *Follow links to other websites too* is unaffected —
 in that mode everything is fair game anyway. Embedded video is judged by the
 page it sits on, not the video host (see "Videos").
+
+"The site" always means the address you typed in. If that address redirects
+somewhere else (`old-name.co.uk` → `new-name.com`), the crawl still measures
+everything against `old-name.co.uk`, so the new site's own images are skipped
+— enter the address it lands on instead, or tick **Allow media from any host**.
 
 ## How it finds files (works across most site builders)
 
