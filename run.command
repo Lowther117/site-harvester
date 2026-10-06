@@ -47,6 +47,16 @@ if [ ! -x "$VENV/bin/python" ]; then
     fi
 fi
 
+# The Find tab's free web search (ddgs). Kept apart from the block above so an
+# environment made before the Find tab existed picks it up as well, and
+# optional: without it the tab falls back to its slower built-in search.
+if ! "$VENV/bin/python" -c "import ddgs" >/dev/null 2>&1; then
+    note "Adding the web-search library for the Find tab..."
+    "$VENV/bin/python" -m pip install --retries 1 --timeout 10 \
+        -r requirements-find.txt --quiet \
+        || note "It did not install - the Find tab will use its built-in search."
+fi
+
 # Playwright keeps its own cache and returns straight away when Chromium is
 # already there, so this is cheap every launch - and it means a download that
 # failed the first time (no network, closed the window) is retried rather than

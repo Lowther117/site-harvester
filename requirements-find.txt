@@ -1,0 +1,9 @@
+# Site Harvester - the Find tab's free web search. OPTIONAL.
+#
+# ddgs is a key-less metasearch library (it asks several search engines and
+# merges the answers). The launchers and build scripts install it on their
+# own and carry on if it will not install - it needs Python 3.10 or newer -
+# in which case the Find tab falls back to its slower built-in search.
+#
+# By hand:   pip install -r requirements-find.txt
+ddgs>=9.0

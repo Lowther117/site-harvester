@@ -20,6 +20,7 @@ harvester-crash.log
 
 # settings the app writes next to itself
 site_harvester_ui.json
+find-last-log.txt
 
 # noise
 __pycache__/

@@ -8,6 +8,12 @@ finds into tidy folders (Images, Videos, Documents, Audio, Archives — and an
 save each site as one clickable PDF and/or one self-contained offline HTML
 mirror, and it will crawl several sites at the same time.
 
+A second tab, **Find**, works the other way round: instead of an address you
+give it a description of what you are after. It searches the web, checks what
+comes back against the description, lists the matches with a score and the
+reason for it, and downloads only the ones you tick. See
+[Finding things by description](#finding-things-by-description-the-find-tab).
+
 > **Before you point it at anything:** this crawler does not consult or obey
 > `robots.txt`, and it does not pause between requests. It also sends a
 > browser-like User-Agent (with `SiteHarvester/1.0` appended) so that servers
@@ -28,10 +34,12 @@ here is either called by that launcher or is the optional standalone build.
 | `build-exe.bat` | optional: double-click to build | – | Makes a standalone `dist\Site Harvester\` folder (Chromium and ffmpeg inside) |
 | `build-app.command` | – | optional: double-click to build | Makes a standalone `dist/Site Harvester.app` |
 | `site_harvester.py` | the app | the app | The whole program; the launchers run it, or `python site_harvester.py` by hand |
+| `find_tab.py`, `find_engine.py` | used by the app | used by the app | The Find tab: the window and the search/check/download work behind it. Delete both and the app opens without the tab |
 | `theme.py` | used by the app | used by the app | The light/dark palettes and widget styling (shared with my other desktop apps) |
 | `site_harvester_app.py` | bundled by the builder | bundled by the builder | Start-up wrapper inside the standalone builds (adds the `selftest` and crash log) - not for running by hand |
 | `requirements.txt` | used by setup | used by setup | The Python libraries it needs |
 | `requirements-fallback.txt` | optional | optional | WeasyPrint, the lower-fidelity PDF fallback (see below) |
+| `requirements-find.txt` | installed by the launcher | installed by the launcher | `ddgs`, one of the Find tab's free search sources. Optional: without it the tab uses the others |
 
 ## Setting it up
 
@@ -56,6 +64,10 @@ So there are no surprises:
 | Python packages | into `.venv-win\` in this folder | into `.venv-mac/` in this folder |
 | Headless Chromium | Playwright's own cache | Playwright's own cache |
 | ffmpeg (optional) | portable copy downloaded into `tools\` | `brew install ffmpeg` |
+| Web search for Find (optional) | `ddgs` into `.venv-win\` | `ddgs` into `.venv-mac/` |
+
+The last row is checked on every launch, not only the first, so a folder that
+was set up before the Find tab existed picks it up the next time it is opened.
 
 Nothing needs administrator permission and nothing goes on your PATH. On Windows
 the Python environment and ffmpeg land inside this folder, so deleting the
@@ -117,6 +129,7 @@ to itself.
 ## What you get
 
 - `site_harvester.py` — the app itself
+- `find_tab.py`, `find_engine.py` — the Find tab
 - `theme.py` — its light/dark palettes and widget styling
 - `run.bat` / `run.command` — launchers (build an environment, then start it)
 - `build-exe.bat` / `build-app.command` — optional standalone builders
@@ -125,11 +138,16 @@ to itself.
 - `ensure_python.ps1` — finds or installs Python on Windows, for both of those
 - `requirements.txt` — the libraries it needs
 - `requirements-fallback.txt` — the optional PDF fallback (see below)
+- `requirements-find.txt` — the optional web-search library for the Find tab
 - `README.md` — this file
 
 ## How to use it
 
-The window is one column of controls, top to bottom:
+The window has two tabs. **Harvest** is the one described here: give it
+addresses and it crawls them. **Find** searches the web from a description
+and has [its own section](#finding-things-by-description-the-find-tab).
+
+The Harvest tab is one column of controls, top to bottom:
 
 1. **Website addresses (one per line)** — paste one address per line (e.g.
    `https://example.com`). `https://` is added if you leave it off, blank
@@ -206,6 +224,121 @@ SiteHarvester/
 A file whose name is already taken gets `_1`, `_2`, … added. If the PDF had
 to fall back to the basic engine there is also a `_pdf_engine.txt` note in
 the site folder saying why.
+
+## Finding things by description (the Find tab)
+
+Harvest needs an address. Find needs only a description:
+
+1. **What are you looking for?** — type it the way you would into a search
+   engine, e.g. `2024 Volkswagen Polo R-Line owner's manual PDF`. Put
+   `"quotes"` round a phrase that must appear exactly, and a `-` in front of a
+   word that must not (`-forum`). A file type named in the description (PDF,
+   Excel, zip, mp3…) is picked up and searched for.
+2. **Find** — tick the kinds of thing you want: Documents, Images, Videos,
+   Audio, Archives, and/or Web pages.
+3. **Only these sites / Never these sites** — optional, comma-separated
+   (`gov.uk, nhs.uk`). **Other file endings** adds types the boxes don't cover
+   (`stl, apk`).
+4. **Search.** It then works through four stages, all shown in the log:
+   - **Search** — the description becomes a handful of queries (one per file
+     type, plus a plain one) which go to the search source, a couple of
+     seconds apart.
+   - **Check** — every result is visited. A result that is itself a file is
+     confirmed with the server (real type and size, dead links dropped). A
+     result that is a page is read, and with *Look inside result pages for
+     files* ticked, every wanted file it links to is listed too.
+   - **Score** — each candidate gets 0–100 for how many of your words it
+     matches and where: its own title, file name and link text count in full,
+     the search snippet for less, and the text of a page it merely sits on
+     for much less.
+   - **Review** — the list fills, best first. Click a row to see its full
+     address and why it scored what it did.
+5. **Tick what you want** — click the `[ ]` at the left of a row (or select
+   rows and press Space), then **Download ticked**. Nothing is downloaded
+   before that. Double-click a row to open it in your browser first; right-click
+   for more.
+
+Files go to `<save folder>/Find/<the description>/<Documents|Images|…>/`, with
+a `find-results.csv` beside them recording where each one came from, its
+score and the reason. Ticked web pages are saved as plain `.html` snapshots;
+for a proper copy of a page (its files, the PDF, the mirror, embedded video)
+use **Send to Harvest tab**, which drops the page addresses into the Harvest
+tab ready to Start. For a file row it sends the page the file was found on.
+
+Other controls:
+
+- **Results to check** — how many search results are visited (20–150). More
+  finds more and takes longer.
+- **Show score from** — hides rows below a score. *Tick all shown* then ticks
+  exactly what is left.
+- **Auto-download from score** — off by default. Set it to, say, 80 and
+  anything scoring 80 or more is downloaded as soon as the search ends,
+  without waiting to be ticked. Use it once you trust a search.
+- **Stop** — ends the search or the downloads; a file part-way through is
+  removed.
+
+### Where the search results come from
+
+Find > **Settings…** has the choices, and a **Test search** button that tries
+them for real.
+
+- **Free search** (the default) needs no key. It tries these in turn until one
+  returns results, and the log says which one answered each query:
+  1. [`ddgs`](https://github.com/deedy5/ddgs), a library that asks several
+     search engines and merges the answers. The launcher installs it; it needs
+     Python 3.10 or newer and is simply skipped where it is missing.
+  2. Bing's result page, fetched directly.
+  3. Brave Search's result page, fetched directly.
+  4. The same two pages loaded in the headless Chromium the Harvest tab uses
+     for PDFs. Slower, but to a site that turns plain fetches away it looks
+     like a real browser.
+  5. DuckDuckGo's result page, last, because it is the quickest to demand a
+     human check and keeps asking once it has.
+
+  A source that fails twice running is left out for the rest of that search.
+- **Brave Search API** — steadier under heavy use. It needs a key from
+  <https://brave.com/search/api/>, which means an account and a card on file
+  even though light use sits inside the monthly free credit.
+
+Free search engines push back if they are asked too much too quickly. Only
+when every source has turned a query away does the tab wait 20 seconds and
+try once more, then skip that query and tell you. If every query ends that
+way, wait a few minutes or switch to a Brave key.
+
+The log of the last search is also kept in `find-last-log.txt` beside the app.
+
+### AI help (optional, off by default)
+
+Out of the box the tab matches on the *words* in the description, so it works
+best when the description is close to what the thing would be called. With AI
+help on, a language model writes the search queries and then judges each
+result against the description, which is what makes loose wording work
+("the wiring diagram for the infotainment unit, not forum posts"). Two ways to
+get it, both in Settings:
+
+- **Anthropic API** — needs an API key; costs a small amount per search.
+- **Ollama on this computer** — free and private, needs
+  [Ollama](https://ollama.com) installed and running with a model pulled.
+
+If the AI cannot be reached, the search carries on with the keyword queries
+and scores and says so in the log.
+
+### Politeness and limits
+
+Unlike the Harvest tab, Find visits many different sites in a short time, so
+it has brakes, all adjustable in Settings: a pause between two requests to
+the same site (1 second), how many sites are checked at once (6), the largest
+single file it will download (200 MB) and the most it will download in one go
+(1000 MB). It still does not consult `robots.txt`.
+
+### What Find cannot do
+
+- It only finds what search engines have indexed. Anything behind a login, or
+  on a site that blocks indexing, still needs an address and the Harvest tab.
+- A score is word-matching (or a model's opinion), not proof. The review step
+  is there because the top row is not always the right file.
+- API keys are stored as plain text in `site_harvester_ui.json` beside the app.
+  That file is in `.gitignore`.
 
 ## Several sites at once
 
@@ -384,6 +517,7 @@ rather than failing, and the log tells you how to install it
   reach content that's hidden behind a login.
 - The crawl options (depth, scope, file types, the tickboxes) are not
   remembered between runs — only the theme and the default save folder are.
+  The Find tab does remember its boxes and settings (not the description).
 - **It does not obey `robots.txt` and does not rate-limit itself.** There is no
   delay between requests, so a large crawl hits a server hard. Use it on sites
   you own or have permission to download from, be mindful of each site's terms
@@ -410,6 +544,18 @@ rather than failing, and the log tells you how to install it
   `harvester-selftest.txt` beside the built app — it says which piece is missing. `harvester-crash.log`
   next to the app catches anything that goes wrong later than that, and the full
   build is in `build-mac-log.txt` / `build-win-log.txt`.
+- **There is no Find tab.** The activity log on the Harvest tab says why in
+  its first line. Usually `find_tab.py` or `find_engine.py` is missing from
+  the folder. Everything else works without them.
+- **Find says every free search source turned it away, or every search comes
+  back empty.** The search engines have had enough of this connection for
+  now. Wait a few minutes, lower *Results to check*, or put a Brave API key
+  into Find > Settings. *Test search* in that window shows which source, if
+  any, is answering, and `find-last-log.txt` beside the app has the detail.
+- **The Find log says "ddgs is not installed".** The free search library did
+  not install - it needs Python 3.10 or newer. Run the launcher again with
+  the internet connected, or `pip install -r requirements-find.txt` inside
+  the environment. The tab works without it through the other sources.
 - **Want to run it by hand?** From inside this folder:
   `pip install -r requirements.txt` then `python site_harvester.py`
   (`python3` on macOS).

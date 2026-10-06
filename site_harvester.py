@@ -8,6 +8,10 @@ and anything else), sorting the results into folders by file type — and
 optionally saves a single, clickable PDF copy and/or a single-file offline
 mirror of every page it visits.
 
+A second tab, Find, works the other way round: describe what you are after
+and it searches the web, lists what matches, and downloads only what you
+tick. That lives in find_tab.py (the window) and find_engine.py (the work).
+
 GUI: Tkinter (bundled with Python, nothing extra to install for the interface)
 Crawling/parsing: requests + beautifulsoup4
 Page-to-PDF: the headless Chromium that Playwright installs prints each page,
@@ -184,20 +188,43 @@ except ImportError:
 # with --collect-all / --hidden-import, so nothing needs importing here.
 
 # --- Make the bundled app find Playwright's browser ------------------------- #
-# The build scripts download Chromium with PLAYWRIGHT_BROWSERS_PATH=0, which
-# puts it inside the playwright package (driver/package/.local-browsers) so it
-# travels INSIDE the built app. Playwright only looks there when that same
-# variable is "0" at run time, so it is set here whenever a bundled browser is
-# actually present. Otherwise the usual per-user cache is used - that is where
-# a from-source 'playwright install chromium' saves it - unless the
-# environment already names a location.
+# A standalone build carries its own Chromium, in one of two places:
+#
+#   macOS    Site Harvester.app/Contents/Resources/pw-browsers - copied in by
+#            build-app.command AFTER PyInstaller has run, because PyInstaller
+#            re-signs every binary it collects and Chromium's do not survive it.
+#   Windows  inside the playwright package (driver/package/.local-browsers),
+#            where build-exe.bat downloads it with PLAYWRIGHT_BROWSERS_PATH=0
+#            and --collect-all playwright carries it along.
+#
+# Playwright only looks in either when PLAYWRIGHT_BROWSERS_PATH says so, so it
+# is set here whenever a bundled browser is actually present. Otherwise the
+# usual per-user cache is used - that is where a from-source
+# 'playwright install chromium' saves it - unless the environment already
+# names a location.
+def _has_chromium(folder):
+    try:
+        return os.path.isdir(folder) and any(
+            n.startswith("chromium") for n in os.listdir(folder))
+    except OSError:
+        return False
+
+
 def _bundled_browsers():
+    """The folder holding a browser that travels with this build, or None."""
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(os.path.realpath(sys.executable))
+        for folder in (
+            os.path.join(os.path.dirname(exe_dir), "Resources", "pw-browsers"),
+            os.path.join(getattr(sys, "_MEIPASS", exe_dir), "pw-browsers"),
+        ):
+            if _has_chromium(folder):
+                return folder
     try:
         import playwright as _pw_pkg
         folder = os.path.join(os.path.dirname(_pw_pkg.__file__),
                               "driver", "package", ".local-browsers")
-        if os.path.isdir(folder) and any(
-                n.startswith("chromium") for n in os.listdir(folder)):
+        if _has_chromium(folder):
             return folder
     except Exception:
         pass
@@ -205,8 +232,12 @@ def _bundled_browsers():
 
 
 if not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
-    if _bundled_browsers():
-        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+    _pw_bundled = _bundled_browsers()
+    if _pw_bundled:
+        # "0" is Playwright's own word for "inside my package"; anywhere
+        # else has to be spelt out.
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = (
+            "0" if _pw_bundled.endswith(".local-browsers") else _pw_bundled)
     else:
         for _pw_cache in (
             os.path.expanduser("~/Library/Caches/ms-playwright"),   # macOS
@@ -2384,7 +2415,7 @@ class App(tk.Tk):
             avail_w = self.winfo_screenwidth() - 40
         except Exception:
             avail_h, avail_w = 860, 720
-        self.geometry(f"{min(720, avail_w)}x{min(860, avail_h)}")
+        self.geometry(f"{min(780, avail_w)}x{min(860, avail_h)}")
         self.minsize(min(640, avail_w), min(760, avail_h))
 
         self.log_q = queue.Queue()
@@ -2417,6 +2448,11 @@ class App(tk.Tk):
         them a moment, then go."""
         self.stop_event.set()
         self.abort_event.set()
+        if getattr(self, "find_tab", None) is not None:
+            try:
+                self.find_tab.shutdown()
+            except Exception:
+                pass
         worker = self.worker
         if worker is not None and worker.is_alive():
             try:
@@ -2496,11 +2532,20 @@ class App(tk.Tk):
                                 highlightbackground=pal["border"],
                                 highlightcolor=pal["accent"],
                                 font=(mono, 10))
+        if getattr(self, "find_tab", None) is not None:
+            try:
+                self.find_tab.apply_theme(pal, mono)
+            except Exception:
+                pass
 
     def _build_ui(self):
         pad = {"padx": 12, "pady": 6}
-        main = ttk.Frame(self)
-        main.pack(fill="both", expand=True, padx=8, pady=8)
+        # Two tabs: Harvest (give it an address, it crawls) and Find (give it
+        # a description, it searches). Everything below builds the first.
+        self.tabs = ttk.Notebook(self)
+        self.tabs.pack(fill="both", expand=True, padx=8, pady=8)
+        main = ttk.Frame(self.tabs)
+        self.tabs.add(main, text="Harvest")
 
         ttk.Label(main, text="Website addresses (one per line)").pack(anchor="w", **pad)
         url_frame = ttk.Frame(main)
@@ -2610,6 +2655,33 @@ class App(tk.Tk):
         scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
         scroll.pack(side="right", fill="y")
         self.log_text.config(yscrollcommand=scroll.set)
+
+        self._add_find_tab()
+
+    def _add_find_tab(self):
+        """Add the Find tab. It is a separate pair of files (find_tab.py,
+        find_engine.py) and is deliberately allowed to fail: if it cannot be
+        loaded, the reason goes in the activity log and the Harvest tab
+        carries on exactly as it did before the tab existed."""
+        self.find_tab = None
+        tab = None
+        try:
+            import find_tab
+            # This module is handed over rather than imported by name: run
+            # as "python site_harvester.py" it is called __main__, and an
+            # import would load a second copy.
+            tab = find_tab.FindTab(self.tabs, self, sys.modules[__name__])
+            self.tabs.add(tab, text="Find")
+            self.find_tab = tab
+        except Exception as e:
+            if tab is not None:
+                try:
+                    tab.destroy()
+                except Exception:
+                    pass
+            self._append_log(
+                f"The Find tab could not be loaded ({type(e).__name__}: {e}). "
+                "Everything on this tab works as before.")
 
     @staticmethod
     def _default_out():

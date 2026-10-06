@@ -169,14 +169,64 @@ else
     echo "   will not be bundled (needs: brew install pango)"
 fi
 
+# ddgs is the Find tab's free, key-less web search. Optional in the same way:
+# attempted on its own, and when it is missing the app still builds and the
+# Find tab uses its built-in search. "import ddgs.ddgs" rather than
+# "import ddgs" because the package loads lazily - only the inner module
+# proves that primp and lxml, which it cannot work without, are there too.
+# Its search engines are found by scanning a folder at run time, which
+# PyInstaller cannot see, hence --collect-all.
+say "Web search for the Find tab (ddgs)"
+"$PY" -m pip install --only-binary :all: -r requirements-find.txt \
+    || echo "   not installed - the Find tab will use its built-in search"
+FIND_FLAG=""
+if "$PY" -c 'import ddgs.ddgs, primp' >/dev/null 2>&1; then
+    FIND_FLAG="--collect-all ddgs --collect-all primp"
+    echo "   will be bundled"
+else
+    echo "   will not be bundled"
+fi
+
 # The headless Chromium prints the pages for the clickable PDF, so it is not
-# optional. PLAYWRIGHT_BROWSERS_PATH=0 makes Playwright save it INSIDE its own
-# package, and --collect-all playwright below then carries it into the app -
-# so the app works on a Mac that has never seen Playwright. (The app sets the
-# same variable on start-up when it finds the bundled copy.) Adds ~200 MB.
+# optional - but it must NOT go through PyInstaller. PyInstaller rewrites and
+# re-signs every binary it collects, one file at a time, and Chromium's files
+# do not survive that: the full "Google Chrome for Testing.app" fails at
+# codesign ("bundle format unrecognized") and the headless shell's libEGL.dylib
+# fails at install_name_tool ("load commands do not fit"). Either stops the
+# whole build with no app made.
+#
+# So the browser is downloaded to a folder of its own beside the build
+# environment, kept out of the playwright package that --collect-all scoops
+# up, and copied into the finished app untouched (see "Adding the browser"
+# below). The app looks for it there on start-up (_bundled_browsers() in
+# site_harvester.py).
+#
+# --only-shell: the headless shell is the only browser this app ever starts
+# (it launches with headless=True); the full Chrome app would add ~360 MB
+# for nothing.
 say "Headless browser (Chromium) - bundled into the app"
-PLAYWRIGHT_BROWSERS_PATH=0 "$PY" -m playwright install chromium \
+PW_STAGE="$PWD/$VENV/pw-browsers"
+mkdir -p "$PW_STAGE"
+# A build environment from before this change has the browser inside the
+# package. Keep the parts that are wanted (saves the download), drop the rest.
+PW_PKG="$("$PY" -c 'import os, playwright; print(os.path.join(os.path.dirname(playwright.__file__), "driver", "package", ".local-browsers"))' 2>/dev/null)"
+if [ -n "$PW_PKG" ] && [ -d "$PW_PKG" ]; then
+    for keep in "$PW_PKG"/chromium_headless_shell-* "$PW_PKG"/ffmpeg-*; do
+        [ -d "$keep" ] || continue
+        [ -e "$PW_STAGE/$(basename "$keep")" ] || mv "$keep" "$PW_STAGE/"
+    done
+    rm -rf "$PW_PKG"
+    echo "   moved the browser out of the playwright package"
+fi
+PLAYWRIGHT_BROWSERS_PATH="$PW_STAGE" "$PY" -m playwright install --only-shell chromium \
     || echo "   WARNING: not downloaded - the PDF and 'Render JavaScript' need it."
+HAVE_BROWSER=""
+if ls -d "$PW_STAGE"/chromium_headless_shell-* >/dev/null 2>&1; then
+    HAVE_BROWSER=1
+    echo "   headless shell ready: $(ls "$PW_STAGE" | tr '\n' ' ')"
+else
+    echo "   WARNING: the headless shell is not there - the PDF and 'Render JavaScript' need it."
+fi
 
 # ffmpeg is what merges best-quality video and audio streams. imageio-ffmpeg
 # is a static ffmpeg wrapped as an ordinary pip package, so it is baked in
@@ -204,11 +254,31 @@ rm -rf build dist "Site Harvester.spec"
     --hidden-import pypdf \
     --hidden-import site_harvester \
     --hidden-import theme \
-    $WEASY_FLAG $FFMPEG_FLAG \
+    --hidden-import find_tab \
+    --hidden-import find_engine \
+    $WEASY_FLAG $FFMPEG_FLAG $FIND_FLAG \
     site_harvester_app.py \
     || fail "PyInstaller failed - the messages above say why"
 
 [ -x "$BIN" ] || fail "the build finished but $APP is not there"
+
+# --------------------------------------------------------------------------
+# 3b. Adding the browser
+#
+# Copied in after PyInstaller has finished, with ditto so the symlinks and
+# the signatures Chromium shipped with arrive intact. Contents/Resources is
+# where a bundle keeps things that are data as far as its own signature is
+# concerned.
+# --------------------------------------------------------------------------
+if [ -n "$HAVE_BROWSER" ]; then
+    say "Adding the browser to the app"
+    mkdir -p "$APP/Contents/Resources"
+    if ditto "$PW_STAGE" "$APP/Contents/Resources/pw-browsers"; then
+        echo "   $(du -sh "$APP/Contents/Resources/pw-browsers" | cut -f1) copied"
+    else
+        echo "   WARNING: the browser could not be copied in - the PDF and 'Render JavaScript' will not work."
+    fi
+fi
 
 # --------------------------------------------------------------------------
 # 4. Make it launchable

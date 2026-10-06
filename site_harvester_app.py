@@ -128,12 +128,26 @@ def selftest():
     for label, mod in (("playwright (PDF, JS)", "playwright"),
                        ("pypdf (merges the PDF)", "pypdf"),
                        ("yt-dlp (embedded video)", "yt_dlp"),
-                       ("weasyprint (fallback)", "weasyprint")):
+                       ("weasyprint (fallback)", "weasyprint"),
+                       # ddgs.ddgs, not ddgs: the package loads lazily, and
+                       # only the inner module pulls in primp and lxml.
+                       ("ddgs (Find tab search)", "ddgs.ddgs")):
         try:
             __import__(mod)
             print("  {:<24} yes".format(label))
         except Exception:
             print("  {:<24} no".format(label))
+
+    # The Find tab is two more files. The app opens without them (the tab is
+    # simply not there), so a miss is reported rather than failing the build.
+    try:
+        import find_engine
+        import find_tab                     # noqa: F401
+        print("  {:<24} yes{}".format(
+            "Find tab", "" if find_engine.ddgs_version()
+            else " (ddgs is not bundled - the other search sources are used)"))
+    except Exception as exc:
+        print("  {:<24} MISSING - {}".format("Find tab", exc))
 
     try:
         import site_harvester

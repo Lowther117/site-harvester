@@ -74,6 +74,20 @@ set "WEASY_FLAG="
 if not errorlevel 1 set "WEASY_FLAG=--collect-all weasyprint"
 if defined WEASY_FLAG (echo    ...will be bundled) else (echo    ...not available, building without it)
 
+rem ddgs is the Find tab's free, key-less web search. Optional in the same
+rem way: attempted on its own, and when it is missing the app still builds
+rem and the Find tab uses its built-in search. "import ddgs.ddgs" rather than
+rem "import ddgs" because the package loads lazily - only the inner module
+rem proves that primp and lxml, which it cannot work without, are there too.
+rem Its search engines are found by scanning a folder at run time, which
+rem PyInstaller cannot see, hence --collect-all.
+echo    Web search for the Find tab ^(ddgs^)...
+"%PY%" -m pip install --only-binary :all: -r "%HERE%requirements-find.txt" >> "%LOG%" 2>&1
+set "FIND_FLAG="
+"%PY%" -c "import ddgs.ddgs, primp" >nul 2>&1
+if not errorlevel 1 set "FIND_FLAG=--collect-all ddgs --collect-all primp"
+if defined FIND_FLAG (echo    ...will be bundled) else (echo    ...not available, the Find tab will use its built-in search)
+
 rem The headless Chromium prints the pages for the clickable PDF, so it is
 rem not optional. PLAYWRIGHT_BROWSERS_PATH=0 makes Playwright save it INSIDE
 rem its own package, and --collect-all playwright below then carries it into
@@ -116,7 +130,9 @@ if exist "%HERE%Site Harvester.spec" del /q "%HERE%Site Harvester.spec"
     --hidden-import pypdf ^
     --hidden-import site_harvester ^
     --hidden-import theme ^
-    %WEASY_FLAG% %FFMPEG_FLAG% ^
+    --hidden-import find_tab ^
+    --hidden-import find_engine ^
+    %WEASY_FLAG% %FFMPEG_FLAG% %FIND_FLAG% ^
     "%HERE%site_harvester_app.py" >> "%LOG%" 2>&1
 if errorlevel 1 (
     echo    Build failed.
