@@ -253,6 +253,8 @@ Harvest needs an address. Find needs only a description:
      for much less.
    - **Review** — the list fills, best first. Click a row to see its full
      address and why it scored what it did.
+   The bar between the results list and the log can be dragged up and down to
+   give the log more or less room; where you leave it is remembered.
 5. **Tick what you want** — click the `[ ]` at the left of a row (or select
    rows and press Space), then **Download ticked**. Nothing is downloaded
    before that. Double-click a row to open it in your browser first; right-click
@@ -316,12 +318,21 @@ result against the description, which is what makes loose wording work
 ("the wiring diagram for the infotainment unit, not forum posts"). Two ways to
 get it, both in Settings:
 
+- **Ollama on this computer** — free and private; the model runs on your own
+  machine. The build scripts (`build-app.command` / `build-exe.bat`) install
+  [Ollama](https://ollama.com) and download the model (`llama3.2`, about
+  2 GB, once), so a freshly built app has it ready: pick it under AI help in
+  Settings. After that the app looks after it — it starts Ollama when it is
+  not running and fetches the model itself if it is missing, with progress in
+  the log. Neither is packed *inside* the app (the model belongs to Ollama and
+  lives in your user folder), so on a computer the app was copied to, Ollama
+  itself has to be installed once; the app says so if it is not there.
 - **Anthropic API** — needs an API key; costs a small amount per search.
-- **Ollama on this computer** — free and private, needs
-  [Ollama](https://ollama.com) installed and running with a model pulled.
+  Nothing to install.
 
 If the AI cannot be reached, the search carries on with the keyword queries
-and scores and says so in the log.
+and scores and says so in the log. To build without the AI step, set
+`HARVESTER_SKIP_AI=1` first; `HARVESTER_AI_MODEL=<name>` picks another model.
 
 ### Politeness and limits
 

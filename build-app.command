@@ -187,6 +187,85 @@ else
     echo "   will not be bundled"
 fi
 
+# --------------------------------------------------------------------------
+# AI help for the Find tab: Ollama (the program that runs a language model on
+# this Mac) and the model itself.
+#
+# Neither goes INSIDE the app - the model alone is about 2 GB and belongs to
+# Ollama, which keeps it in ~/.ollama for every program that uses it. They are
+# installed here so that a freshly built app has AI help ready to switch on
+# (Find > Settings > AI help). The app starts Ollama by itself when it is
+# needed, and fetches the model by itself on a Mac that does not have it yet.
+#
+# Optional like the two above: a failure is a warning, and the Find tab then
+# works on the words in the description as before.
+#   HARVESTER_SKIP_AI=1 ./build-app.command      leaves this step out
+#   HARVESTER_AI_MODEL=name ./build-app.command  downloads a different model
+# --------------------------------------------------------------------------
+say "AI help for the Find tab (Ollama and its model)"
+AI_MODEL="${HARVESTER_AI_MODEL:-llama3.2}"
+
+find_ollama() {
+    command -v ollama 2>/dev/null && return 0
+    local c
+    for c in /opt/homebrew/bin/ollama /usr/local/bin/ollama \
+             /Applications/Ollama.app/Contents/Resources/ollama \
+             "$HOME/Applications/Ollama.app/Contents/Resources/ollama"; do
+        [ -x "$c" ] && { echo "$c"; return 0; }
+    done
+    return 1
+}
+ollama_up() { curl -fsS -m 3 http://127.0.0.1:11434/api/version >/dev/null 2>&1; }
+ollama_has_model() {
+    "$OLLAMA" list 2>/dev/null | awk 'NR>1 {print $1}' \
+        | grep -qx -e "$AI_MODEL" -e "$AI_MODEL:latest"
+}
+
+if [ -n "$HARVESTER_SKIP_AI" ]; then
+    echo "   skipped (HARVESTER_SKIP_AI is set)"
+else
+    OLLAMA="$(find_ollama)"
+    if [ -z "$OLLAMA" ]; then
+        echo "   Ollama is not installed - adding it with Homebrew"
+        brew_install ollama && OLLAMA="$(find_ollama)"
+    fi
+    if [ -z "$OLLAMA" ]; then
+        echo "   WARNING: Ollama could not be installed - AI help will say so until it is."
+        echo "            Everything else works. To add it later: brew install ollama"
+    else
+        echo "   Ollama: $OLLAMA"
+        OLLAMA_STARTED=""
+        if ! ollama_up; then
+            "$OLLAMA" serve >/dev/null 2>&1 &
+            OLLAMA_STARTED=$!
+            for _ in $(seq 1 30); do ollama_up && break; sleep 1; done
+        fi
+        if ! ollama_up; then
+            echo "   WARNING: Ollama did not start, so the model was not downloaded."
+            echo "            The app fetches it itself the first time AI help is used."
+        elif ollama_has_model; then
+            echo "   model $AI_MODEL: already downloaded"
+        else
+            echo "   downloading the model $AI_MODEL (about 2 GB, once - the slow part)"
+            # ollama redraws one progress line over and over; cut that down to
+            # a line every ten per cent so the window and the log stay readable.
+            "$OLLAMA" pull "$AI_MODEL" < /dev/null 2>&1 \
+                | tr '\r' '\n' \
+                | sed $'s/\x1b\\[[0-9;?]*[A-Za-z]//g' \
+                | awk '{ if (match($0, /[0-9]+%/)) { p = substr($0, RSTART, RLENGTH - 1) + 0; d = int(p / 10);
+                           if (d != last) { last = d; print "      " p "%"; fflush() } }
+                         else if (NF && $0 != prev) { prev = $0; print "      " $0; fflush() } }'
+            if ollama_has_model; then
+                echo "   model $AI_MODEL: ready"
+            else
+                echo "   WARNING: the model did not download."
+                echo "            The app fetches it itself the first time AI help is used."
+            fi
+        fi
+        [ -n "$OLLAMA_STARTED" ] && kill "$OLLAMA_STARTED" 2>/dev/null
+    fi
+fi
+
 # The headless Chromium prints the pages for the clickable PDF, so it is not
 # optional - but it must NOT go through PyInstaller. PyInstaller rewrites and
 # re-signs every binary it collects, one file at a time, and Chromium's files

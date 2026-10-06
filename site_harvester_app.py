@@ -146,6 +146,12 @@ def selftest():
         print("  {:<24} yes{}".format(
             "Find tab", "" if find_engine.ddgs_version()
             else " (ddgs is not bundled - the other search sources are used)"))
+        # AI help is optional and lives outside the app (see the build
+        # script), so this only reports what is on this computer.
+        exe = find_engine.find_ollama()
+        print("  {:<24} {}".format(
+            "Ollama (AI help)",
+            exe if exe else "not installed - the build script installs it"))
     except Exception as exc:
         print("  {:<24} MISSING - {}".format("Find tab", exc))
 

@@ -36,6 +36,9 @@ import json
 import os
 import random
 import re
+import shutil
+import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -692,6 +695,139 @@ def _json_from(text, opener="[", closer="]"):
     return json.loads(text[start:end + 1])
 
 
+# --- Ollama: the free, local way to get AI help ------------------------------ #
+# build-app.command / build-exe.bat install Ollama and download the model, so
+# a freshly built app has both. The app then looks after the rest itself: it
+# starts Ollama when it is not running, and fetches the model if it has gone
+# missing (or was never downloaded, on a computer the app was copied to).
+_ollama_proc = None            # an "ollama serve" this app started, if any
+
+
+def find_ollama():
+    """Path of the ollama program, or None. An app opened from Finder or a
+    shortcut starts with a bare PATH, so the usual homes are checked too."""
+    exe = "ollama.exe" if sys.platform.startswith("win") else "ollama"
+    found = shutil.which(exe) or shutil.which("ollama")
+    if found:
+        return found
+    if sys.platform.startswith("win"):
+        candidates = [
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Ollama", exe),
+            os.path.join(os.environ.get("ProgramFiles", ""), "Ollama", exe),
+        ]
+    else:
+        candidates = ["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama",
+                      "/Applications/Ollama.app/Contents/Resources/ollama",
+                      os.path.expanduser("~/Applications/Ollama.app/Contents/Resources/ollama"),
+                      "/usr/bin/ollama"]
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return c
+    return None
+
+
+def ollama_running(base, timeout=2.5):
+    try:
+        return requests.get(base + "/api/version", timeout=timeout).status_code == 200
+    except requests.RequestException:
+        return False
+
+
+def _stop_ollama():
+    global _ollama_proc
+    proc, _ollama_proc = _ollama_proc, None
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+
+def start_ollama(base, stop=None, wait=30):
+    """Make sure an Ollama server is answering at `base`, starting one if it
+    is on this computer and not running. Raises RuntimeError with a sentence
+    fit for the log when that cannot be done."""
+    global _ollama_proc
+    if ollama_running(base):
+        return
+    host = (urlparse(base).hostname or "").lower()
+    if host not in ("localhost", "127.0.0.1", "::1"):
+        raise RuntimeError(f"Ollama at {base} is not answering")
+    exe = find_ollama()
+    if not exe:
+        raise RuntimeError(
+            "Ollama is not installed on this computer. Run the build script "
+            "(build-app.command / build-exe.bat), which installs it, or get "
+            "it from https://ollama.com")
+    kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+              "stderr": subprocess.DEVNULL}
+    if sys.platform.startswith("win"):
+        kwargs["creationflags"] = 0x08000000        # CREATE_NO_WINDOW
+    try:
+        _ollama_proc = subprocess.Popen([exe, "serve"], **kwargs)
+    except OSError as e:
+        raise RuntimeError(f"Ollama could not be started ({e})")
+    import atexit
+    atexit.register(_stop_ollama)       # only ever stops the one started here
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        if ollama_running(base, timeout=1.5):
+            return
+        if _ollama_proc.poll() is not None:
+            break
+        if stop is not None and stop.wait(0.5):
+            raise RuntimeError("stopped")
+        elif stop is None:
+            time.sleep(0.5)
+    raise RuntimeError("Ollama was started but did not answer")
+
+
+def ollama_has_model(base, model):
+    try:
+        r = requests.get(base + "/api/tags", timeout=10)
+        names = [m.get("name", "") for m in (r.json().get("models") or [])]
+    except (requests.RequestException, ValueError):
+        return False
+    want = model if ":" in model else model + ":latest"
+    return any(n == model or n == want for n in names)
+
+
+def ollama_pull(base, model, log=None, status=None, stop=None):
+    """Download a model, reporting progress every ten per cent."""
+    try:
+        r = requests.post(base + "/api/pull", json={"model": model, "stream": True},
+                          stream=True, timeout=(10, 600))
+    except requests.RequestException as e:
+        raise RuntimeError(f"the model download could not start ({type(e).__name__})")
+    if r.status_code != 200:
+        raise RuntimeError(f"Ollama refused the model download (HTTP {r.status_code})")
+    last = -1
+    try:
+        for line in r.iter_lines():
+            if stop is not None and stop.is_set():
+                raise RuntimeError("stopped")
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("error"):
+                raise RuntimeError(f"model download failed: {row['error']}")
+            total, done = row.get("total") or 0, row.get("completed") or 0
+            if total > 50_000_000:              # the big layer, not the manifests
+                pct = int(done * 100 / total)
+                if status:
+                    status(f"Downloading the AI model {model}: {pct}% of "
+                           f"{human_size(total)}")
+                if pct // 10 > last:
+                    last = pct // 10
+                    if log:
+                        log(f"   AI model {model}: {pct}% of {human_size(total)}")
+    finally:
+        r.close()
+
+
 class AIClient:
     """Talks to Anthropic's API or a local Ollama. Off unless configured."""
 
@@ -699,6 +835,39 @@ class AIClient:
         self.mode = settings.get("ai", "off")
         self.s = settings
         self.session = requests.Session()
+
+    @property
+    def ollama_base(self):
+        return (self.s.get("ollama_url") or "http://localhost:11434").rstrip("/")
+
+    def prepare(self, log=None, status=None, stop=None, allow_pull=True):
+        """Get the AI ready before it is first asked anything. Nothing to do
+        for Anthropic. For Ollama: start it if it is not running, and
+        download the model if it is not there. Raises RuntimeError with the
+        reason when the AI cannot be made ready."""
+        if self.mode != "ollama":
+            return
+        base, model = self.ollama_base, (self.s.get("ollama_model") or "").strip()
+        if not model:
+            raise RuntimeError("no Ollama model is named in Settings")
+        if not ollama_running(base):
+            if log:
+                log("Starting Ollama…")
+            if status:
+                status("Starting Ollama…")
+            start_ollama(base, stop)
+        if not ollama_has_model(base, model):
+            if not allow_pull:
+                raise RuntimeError(
+                    f"Ollama is running but the model \"{model}\" is not "
+                    "downloaded yet. It is fetched automatically on the first "
+                    "AI search (about 2 GB for the default model).")
+            if log:
+                log(f"The AI model \"{model}\" is not on this computer yet - "
+                    "downloading it once (about 2 GB for the default model)…")
+            ollama_pull(base, model, log, status, stop)
+            if log:
+                log(f"   AI model {model}: ready")
 
     @property
     def enabled(self):
@@ -734,7 +903,7 @@ class AIClient:
             parts = r.json().get("content") or []
             return "".join(p.get("text", "") for p in parts if isinstance(p, dict))
         if self.mode == "ollama":
-            base = (self.s.get("ollama_url") or "http://localhost:11434").rstrip("/")
+            base = self.ollama_base
             r = self.session.post(
                 base + "/api/chat",
                 json={"model": self.s.get("ollama_model"), "stream": False,
@@ -1137,6 +1306,13 @@ class FindEngine:
 
         # --- queries --------------------------------------------------------
         queries = []
+        if ai.enabled:
+            try:
+                ai.prepare(self.log, lambda t: self.emit("status", t), self.stop)
+            except Exception as e:
+                self.log(f"AI help is not available: {e}")
+                self.log("Carrying on with the keyword search.")
+                ai.mode = "off"
         if ai.enabled:
             self.emit("status", "Asking the AI to write the searches…")
             try:

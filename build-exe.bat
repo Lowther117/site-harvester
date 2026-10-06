@@ -88,6 +88,67 @@ set "FIND_FLAG="
 if not errorlevel 1 set "FIND_FLAG=--collect-all ddgs --collect-all primp"
 if defined FIND_FLAG (echo    ...will be bundled) else (echo    ...not available, the Find tab will use its built-in search)
 
+rem AI help for the Find tab: Ollama, the program that runs a language model
+rem on this PC, and the model itself.
+rem
+rem Neither goes INSIDE the build - the model alone is about 2 GB and belongs
+rem to Ollama, which keeps it in the user profile for every program that uses
+rem it. They are installed here so that a freshly built app has AI help ready
+rem to switch on under Find, Settings, AI help. The app starts Ollama by
+rem itself when it is needed, and fetches the model by itself on a PC that
+rem does not have it yet.
+rem
+rem Optional like the two above: a failure is a warning, and the Find tab
+rem then works on the words in the description as before.
+rem   set HARVESTER_SKIP_AI=1        before running this leaves the step out
+rem   set HARVESTER_AI_MODEL=name    downloads a different model
+echo    AI help for the Find tab ^(Ollama and its model^)...
+set "AI_MODEL=llama3.2"
+if defined HARVESTER_AI_MODEL set "AI_MODEL=%HARVESTER_AI_MODEL%"
+if defined HARVESTER_SKIP_AI (
+    echo    ...skipped, HARVESTER_SKIP_AI is set
+    goto :ai_done
+)
+call :find_ollama
+if defined OLLAMA goto :ai_have
+echo    ...Ollama is not installed, adding it with winget
+winget install -e --id Ollama.Ollama --silent --accept-package-agreements --accept-source-agreements >> "%LOG%" 2>&1
+call :find_ollama
+if defined OLLAMA goto :ai_have
+echo    ...winget could not do it, fetching the installer from ollama.com
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $f = Join-Path $env:TEMP 'OllamaSetup.exe'; Invoke-WebRequest -Uri 'https://ollama.com/download/OllamaSetup.exe' -OutFile $f -UseBasicParsing; Start-Process -FilePath $f -ArgumentList '/VERYSILENT','/NORESTART' -Wait" >> "%LOG%" 2>&1
+call :find_ollama
+if defined OLLAMA goto :ai_have
+echo    WARNING: Ollama could not be installed - AI help will say so until it is.
+echo    Everything else works. To add it later: https://ollama.com
+goto :ai_done
+
+:ai_have
+echo    Ollama: %OLLAMA%
+powershell -NoProfile -Command "try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 3 http://127.0.0.1:11434/api/version | Out-Null; exit 0 } catch { exit 1 }" >nul 2>&1
+if errorlevel 1 start "" /b "%OLLAMA%" serve >nul 2>&1
+powershell -NoProfile -Command "for ($i = 0; $i -lt 30; $i++) { try { Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 http://127.0.0.1:11434/api/version | Out-Null; exit 0 } catch { Start-Sleep -Seconds 1 } }; exit 1" >nul 2>&1
+if errorlevel 1 (
+    echo    WARNING: Ollama did not start, so the model was not downloaded.
+    echo    The app fetches it itself the first time AI help is used.
+    goto :ai_done
+)
+"%OLLAMA%" list 2>nul | findstr /b /i /c:"%AI_MODEL%" >nul
+if not errorlevel 1 (
+    echo    ...model %AI_MODEL% already downloaded
+    goto :ai_done
+)
+echo    ...downloading the model %AI_MODEL%, about 2 GB, once. This is the slow part.
+"%OLLAMA%" pull %AI_MODEL%
+"%OLLAMA%" list 2>nul | findstr /b /i /c:"%AI_MODEL%" >nul
+if errorlevel 1 (
+    echo    WARNING: the model did not download.
+    echo    The app fetches it itself the first time AI help is used.
+) else (
+    echo    ...model %AI_MODEL% ready
+)
+:ai_done
+
 rem The headless Chromium prints the pages for the clickable PDF, so it is
 rem not optional. PLAYWRIGHT_BROWSERS_PATH=0 makes Playwright save it INSIDE
 rem its own package, and --collect-all playwright below then carries it into
@@ -184,6 +245,14 @@ echo    it could not be installed automatically.
 echo    Install it from https://www.python.org/downloads/windows/
 echo    ^(tick "Add python.exe to PATH"^), then run this again.
 goto :failed
+
+rem Sets OLLAMA to the full path of ollama.exe, or leaves it undefined.
+:find_ollama
+set "OLLAMA="
+for %%p in (ollama.exe) do set "OLLAMA=%%~$PATH:p"
+if not defined OLLAMA if exist "%LOCALAPPDATA%\Programs\Ollama\ollama.exe" set "OLLAMA=%LOCALAPPDATA%\Programs\Ollama\ollama.exe"
+if not defined OLLAMA if exist "%ProgramFiles%\Ollama\ollama.exe" set "OLLAMA=%ProgramFiles%\Ollama\ollama.exe"
+exit /b 0
 
 :failed
 echo.

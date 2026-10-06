@@ -184,30 +184,42 @@ class FindTab(ttk.Frame):
         self.count_var = tk.StringVar(value="")
         ttk.Label(row2, textvariable=self.count_var, style="Dim.TLabel").pack(side="right")
 
-        # --- bottom (packed first so the results list gets what is left) ---
-        bottom = ttk.Frame(self)
-        bottom.pack(side="bottom", fill="x")
-        log_frame = ttk.Frame(bottom)
-        log_frame.pack(side="bottom", fill="x", padx=12, pady=(0, 8))
-        self.log_text = tk.Text(log_frame, height=4, wrap="word", state="disabled")
-        self.log_text.pack(side="left", fill="x", expand=True)
+        # --- results above, log below, with a divider that can be dragged ---
+        # Extra window height goes to the results list (weight 1); the log
+        # keeps whatever height the divider was last dragged to, and that
+        # height is remembered between runs.
+        self.split = ttk.PanedWindow(self, orient="vertical")
+        self.split.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        upper = ttk.Frame(self.split)
+        lower = ttk.Frame(self.split)
+        self.split.add(upper, weight=1)
+        self.split.add(lower, weight=0)
+        self._lower = lower
+        self._sash_placed = False
+        self.split.bind("<Configure>", self._place_sash)
+
+        self.progress = ttk.Progressbar(lower, mode="determinate", maximum=100)
+        self.progress.pack(side="top", fill="x", pady=(6, 4))
+        self.status_var = tk.StringVar(value="Idle. Describe what you want and press Search.")
+        ttk.Label(lower, textvariable=self.status_var).pack(side="top", anchor="w")
+        log_frame = ttk.Frame(lower)
+        log_frame.pack(side="top", fill="both", expand=True, pady=(2, 0))
+        self.log_text = tk.Text(log_frame, height=3, wrap="word", state="disabled")
         sc = ttk.Scrollbar(log_frame, command=self.log_text.yview)
         sc.pack(side="right", fill="y")
+        self.log_text.pack(side="left", fill="both", expand=True)
         self.log_text.config(yscrollcommand=sc.set)
-        self.status_var = tk.StringVar(value="Idle. Describe what you want and press Search.")
-        ttk.Label(bottom, textvariable=self.status_var).pack(side="bottom", anchor="w", padx=12)
-        self.progress = ttk.Progressbar(bottom, mode="determinate", maximum=100)
-        self.progress.pack(side="bottom", fill="x", padx=12, pady=(4, 4))
+
         # The selected row in full (the columns cut long names and
         # addresses short). A fixed-height box, so the list above does not
         # jump about as rows are clicked, and the address can be copied.
-        self.detail = tk.Text(bottom, height=4, wrap="char", state="disabled")
-        self.detail.pack(side="bottom", fill="x", padx=12, pady=(4, 0))
+        self.detail = tk.Text(upper, height=4, wrap="char", state="disabled")
+        self.detail.pack(side="bottom", fill="x", pady=(4, 2))
         self.detail.bind("<1>", lambda _e: self.detail.focus_set())
 
         # --- results --------------------------------------------------------
-        tree_frame = ttk.Frame(self)
-        tree_frame.pack(fill="both", expand=True, padx=12)
+        tree_frame = ttk.Frame(upper)
+        tree_frame.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(tree_frame, columns=[c[0] for c in COLUMNS],
                                  show="headings", selectmode="extended", height=6)
         for cid, head, width, anchor, stretch in COLUMNS:
@@ -247,6 +259,41 @@ class FindTab(ttk.Frame):
         value = str(value) if value is not None else ""
         return value if value in options else default
 
+    LOG_PANE_DEFAULT = 170          # progress bar + status line + ~6 log lines
+    LOG_PANE_MIN = 90
+
+    def _place_sash(self, _event=None):
+        """Put the divider where it was left last time - once, as soon as the
+        tab has a real height to measure against."""
+        if self._sash_placed:
+            return
+        total = self.split.winfo_height()
+        if total < 200:
+            return                      # not laid out yet (or the tab is hidden)
+        try:
+            want = int(self.settings.get("log_h"))
+        except (TypeError, ValueError):
+            # Never dragged: the usual height, or less on a short screen so
+            # the results list is not squeezed to a couple of rows.
+            want = min(self.LOG_PANE_DEFAULT, int(total * 0.4))
+        want = max(self.LOG_PANE_MIN, min(want, total - 190))
+        try:
+            self.split.sashpos(0, total - want)
+            self._sash_placed = True
+        except tk.TclError:
+            pass
+
+    def _log_pane_height(self):
+        """How tall the log pane is now, or None before it has been drawn."""
+        if not self._sash_placed:
+            return None
+        try:
+            total = self.split.winfo_height()
+            h = total - int(self.split.sashpos(0))
+        except (tk.TclError, ValueError):
+            return None
+        return h if total >= 200 and h >= 40 else None
+
     def _set_detail(self, text):
         self.detail.config(state="normal")
         self.detail.delete("1.0", "end")
@@ -272,6 +319,11 @@ class FindTab(ttk.Frame):
             background=pal["bg"], foreground=pal["dim"],
             selectbackground=pal["sel"], selectforeground=pal["text"],
             relief="flat", highlightthickness=0, borderwidth=0)
+        # The divider between the results and the log: wide enough to grab,
+        # and a different shade from the panes either side so it can be seen.
+        style = ttk.Style(self)
+        style.configure("Sash", sashthickness=8, gripcount=0)
+        style.configure("TPanedwindow", background=pal["border"])
         self.tree.tag_configure("hi", foreground=pal["good"])
         self.tree.tag_configure("mid", foreground=pal["text"])
         self.tree.tag_configure("lo", foreground=pal["dim"])
@@ -310,6 +362,9 @@ class FindTab(ttk.Frame):
         s["max_check"] = self.max_check_var.get()
         s["min_score"] = self.min_score_var.get()
         s["auto"] = self.auto_var.get()
+        h = self._log_pane_height()
+        if h:
+            s["log_h"] = h
         data = self.sh._load_ui_settings()
         data["find"] = s
         self.sh._save_ui_settings(data)
@@ -804,7 +859,7 @@ PROVIDER_LABELS = {
 AI_LABELS = {
     "off": "Off - match on the words in the description",
     "anthropic": "Anthropic API (needs a key, small cost per search)",
-    "ollama": "Ollama on this computer (free, needs Ollama running)",
+    "ollama": "Ollama on this computer (free, private)",
 }
 
 
@@ -869,7 +924,10 @@ class SettingsWindow(tk.Toplevel):
         heading("Understanding the description")
         note("With AI on, a model writes the searches and judges each result "
              "against your description, so loose wording works. Off is free "
-             "and needs nothing.")
+             "and needs nothing. Ollama is "
+             + ("installed on this computer" if fe.find_ollama() else
+                "NOT installed yet - the build script installs it")
+             + "; the app starts it and fetches the model by itself.")
         choice("ai", "AI help", AI_LABELS)
         entry("anthropic_key", "Anthropic API key", show="•")
         entry("anthropic_model", "Anthropic model")
@@ -964,6 +1022,7 @@ class SettingsWindow(tk.Toplevel):
                     msg += "  AI: no key entered."
                 else:
                     try:
+                        ai.prepare(allow_pull=False)
                         ai.complete("Reply with the single word OK.", "Say OK.", 10)
                         msg += f"  AI works ({ai.label})."
                     except Exception as e:
