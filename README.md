@@ -241,14 +241,32 @@ Harvest needs an address. Find needs only a description:
    (`stl, apk`).
 4. **Search.** It then works through four stages, all shown in the log:
    - **Search** — the description becomes a handful of queries (one per file
-     type, plus a plain one) which go to the search source, a couple of
-     seconds apart.
-   - **Check** — every result is visited. A result that is itself a file is
-     confirmed with the server (real type and size, dead links dropped). A
-     result that is a page is read, and with *Look inside result pages for
-     files* ticked, every wanted file it links to is listed too.
+     type, a plain one and a "download" one) which go to the search source a
+     couple of seconds apart. Each query is followed onto further result
+     pages - up to four, depending on *Results to check* - because one page
+     is only about ten results.
+   - **Choose** — everything that came back is scored on what the search
+     engine said about it (title, snippet, address) and the most promising
+     are checked first. No single site gets more than its share, so a run of
+     near-identical forum pages cannot crowd out the rest.
+   - **Check** — every chosen result is visited. A result that is itself a
+     file is confirmed with the server (real type and size, dead links
+     dropped). A result that is a page is read, and with *Look inside result
+     pages for files* ticked, every wanted file it links to is listed too.
+     With *…and follow promising links one page deeper* ticked, up to three
+     links on that page which look like the way to the file ("Download",
+     "PDF", or a link whose own text matches) are followed once as well -
+     the result is very often the page *about* the file, with the file a
+     click further on.
+     Two repairs happen quietly here, and the log's last line counts them:
+     an address that comes back "not found" with `+` where the file name has
+     spaces is asked for again with the spaces put back (search engines
+     mangle archive.org file names this way), and a "403 forbidden" is tried
+     once more looking like an ordinary browser. A real refusal - a login, a
+     lending library's restricted file - stays refused.
    - **Score** — each candidate gets 0–100 for how many of your words it
-     matches and where: its own title, file name and link text count in full,
+     matches and where (a long word also matches written as two, so
+     "artbooks" finds "art book"): its own title, file name and link text count in full,
      the search snippet for less, and the text of a page it merely sits on
      for much less.
    - **Review** — the list fills, best first. Click a row to see its full
@@ -270,7 +288,9 @@ tab ready to Start. For a file row it sends the page the file was found on.
 Other controls:
 
 - **Results to check** — how many search results are visited (20–150). More
-  finds more and takes longer.
+  finds more and takes longer: 20 reads one page of results per query, 40
+  two, 80 three and 150 four. This is the first thing to turn up when a
+  search comes back thin.
 - **Show score from** — hides rows below a score. *Tick all shown* then ticks
   exactly what is left.
 - **Auto-download from score** — off by default. Set it to, say, 80 and
@@ -313,8 +333,10 @@ The log of the last search is also kept in `find-last-log.txt` beside the app.
 
 Out of the box the tab matches on the *words* in the description, so it works
 best when the description is close to what the thing would be called. With AI
-help on, a language model writes the search queries and then judges each
-result against the description, which is what makes loose wording work
+help on, a language model suggests other ways the same thing is commonly
+worded or titled - each is searched for as well as what you typed - and then
+judges each result against the description, which is what makes loose wording
+work
 ("the wiring diagram for the infotainment unit, not forum posts"). Two ways to
 get it, both in Settings:
 

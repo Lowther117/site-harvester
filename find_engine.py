@@ -70,6 +70,7 @@ DEFAULTS = {
     "types": ["Documents"],
     "pages": False,
     "inside": True,
+    "deeper": True,
     "extra_exts": "",
     "max_check": "40",
     "min_score": "0",
@@ -88,6 +89,7 @@ DDG_URL = "https://html.duckduckgo.com/html/"
 
 PAGE_READ_LIMIT = 1_500_000       # bytes of a page that are read and searched
 PER_PAGE_FILE_CAP = 25            # most files listed from any one page
+DEEPER_PER_PAGE = 3               # most links followed onward from one page
 AI_JUDGE_CAP = 80                 # most results sent to the AI judge
 AI_BATCH = 20
 
@@ -137,6 +139,14 @@ QUERY_EXTS = {
     "Videos": ["mp4"],
     "Images": [],
 }
+
+# A link that says it leads to the thing itself rather than to more talk.
+DEEPER_HINT_RE = re.compile(
+    r"\b(download|downloads|pdf|epub|full text|read online|read the|view|"
+    r"open|get it|document|file|files|attachment|brochure|manual)\b", re.I)
+DEEPER_PATH_RE = re.compile(
+    r"/(download|downloads|files?|pdfs?|docs?|documents?|details|view|"
+    r"attachments?|media|resources|library)(/|$)", re.I)
 
 # Image file names that are page furniture, not content.
 JUNK_IMAGE_RE = re.compile(
@@ -245,6 +255,13 @@ def term_in(term, hay):
         return True
     if term.endswith("s") and len(term) > 4 and (" " + term[:-1]) in hay:
         return True
+    # A long word that the page writes as two: "artbooks" must find
+    # "art books" and "art book", "handbook" "hand book".
+    if len(term) >= 7 and term.isalpha():
+        stem = term[:-1] if term.endswith("s") else term
+        for i in range(3, len(stem) - 2):
+            if (" " + stem[:i] + " " + stem[i:]) in hay:
+                return True
     return False
 
 
@@ -348,8 +365,10 @@ def host_matches(host, site):
 
 
 def build_queries(spec, categories, extra_exts, include_sites, exclude_sites,
-                  want_pages, limit=6):
-    """Turn a description into a handful of search-engine queries."""
+                  want_pages, limit=6, wordings=()):
+    """Turn a description into a handful of search-engine queries. `wordings`
+    are other ways of saying the same thing (from the AI, when it is on);
+    each gets the same treatment as the description itself."""
     base = spec.query_text
     neg = "".join(f" -site:{s}" for s in exclude_sites[:6])
 
@@ -376,13 +395,17 @@ def build_queries(spec, categories, extra_exts, include_sites, exclude_sites,
     # itself on the first one or two and never reach the rest.
     sites = include_sites[:4] or [None]
     variants = [f" filetype:{e}" for e in exts] + [""]
+    bases = [base] + [w for w in wordings if w]
     queries = []
     for variant in variants:
-        for site in sites:
-            prefix = f"site:{site} " if site else ""
-            queries.append(f"{prefix}{base}{variant}{neg}")
-    if exts and not include_sites:
-        queries.append(f"{base} download{neg}")
+        for b in bases:
+            for site in sites:
+                prefix = f"site:{site} " if site else ""
+                queries.append(f"{prefix}{b}{variant}{neg}")
+        if variant == variants[0] and exts and not include_sites:
+            # Early, so the cap below cannot cut it: a plain "download"
+            # search finds the landing pages a filetype: search never does.
+            queries.append(f"{base} download{neg}")
     limit = max(limit, len(sites))
 
     out, seen = [], set()
@@ -437,7 +460,7 @@ def _clean_hit(url, title, snippet, source):
             "snippet": " ".join((snippet or "").split()), "source": source}
 
 
-def search_ddgs(query, n, region):
+def search_ddgs(query, n, region, page=1):
     from ddgs import DDGS
     try:
         from ddgs.exceptions import (DDGSException, RatelimitException,
@@ -446,7 +469,8 @@ def search_ddgs(query, n, region):
         DDGSException = RatelimitException = TimeoutException = Exception
     try:
         rows = DDGS(timeout=12).text(query, region=region, safesearch="moderate",
-                                     max_results=n, backend=_ddgs_backend())
+                                     max_results=n, page=page,
+                                     backend=_ddgs_backend())
     except RatelimitException as e:
         raise RateLimited(str(e) or "rate limited")
     except TimeoutException as e:
@@ -490,7 +514,7 @@ def search_ddgs_images(query, n, region):
     return hits
 
 
-def search_brave_api(session, key, query, n, region):
+def search_brave_api(session, key, query, n, region, page=1):
     country = (region.split("-")[0] or "us").upper()
     if country == "UK":
         country = "GB"
@@ -498,7 +522,7 @@ def search_brave_api(session, key, query, n, region):
         r = session.get(
             BRAVE_API_URL,
             params={"q": query, "count": max(1, min(int(n), 20)),
-                    "country": country},
+                    "country": country, "offset": max(0, min(page - 1, 9))},
             headers={"Accept": "application/json",
                      "X-Subscription-Token": key}, timeout=20)
     except requests.RequestException as e:
@@ -619,9 +643,36 @@ _FETCH_HEADERS = {"User-Agent": BROWSER_UA,
                   "Accept-Language": "en-GB,en;q=0.9"}
 
 
-def _bing_params(query, region):
+def _bing_params(query, region, page=1):
     country = (region.split("-")[0] or "us").lower()
-    return {"q": query, "cc": "gb" if country == "uk" else country}
+    lang = (region.split("-") + ["en"])[1] or "en"
+    params = {"q": query, "cc": "gb" if country == "uk" else country,
+              "setlang": lang}
+    if page > 1:
+        params["first"] = (page - 1) * 10 + 1
+    return params
+
+
+def _brave_params(query, page=1):
+    params = {"q": query, "source": "web"}
+    if page > 1:
+        params["offset"] = page - 1
+    return params
+
+
+def plus_fixed(url):
+    """The same address with every "+" in its path turned into "%20", or None
+    when there is none. Search engines hand back file addresses with the
+    spaces of the real name written as "+", which is only right in the part
+    after a "?"; in the path it is a literal plus sign and the server says
+    404. (archive.org file names are the usual victims.)"""
+    try:
+        p = urlparse(url)
+    except ValueError:
+        return None
+    if "+" not in p.path:
+        return None
+    return p._replace(path=p.path.replace("+", "%20")).geturl()
 
 
 def looks_blocked(html):
@@ -632,9 +683,9 @@ def looks_blocked(html):
         "verify you are human", "confirm this search was made by a human"))
 
 
-def search_bing_html(session, query, n, region):
+def search_bing_html(session, query, n, region, page=1):
     try:
-        r = session.get(BING_URL, params=_bing_params(query, region),
+        r = session.get(BING_URL, params=_bing_params(query, region, page),
                         headers=_FETCH_HEADERS, timeout=20)
     except requests.RequestException as e:
         raise SearchError(f"Bing could not be reached ({type(e).__name__})")
@@ -648,9 +699,9 @@ def search_bing_html(session, query, n, region):
     return hits[:n]
 
 
-def search_brave_html(session, query, n, region):
+def search_brave_html(session, query, n, region, page=1):
     try:
-        r = session.get(BRAVE_URL, params={"q": query, "source": "web"},
+        r = session.get(BRAVE_URL, params=_brave_params(query, page),
                         headers=_FETCH_HEADERS, timeout=20)
     except requests.RequestException as e:
         raise SearchError(f"Brave Search could not be reached ({type(e).__name__})")
@@ -664,9 +715,12 @@ def search_brave_html(session, query, n, region):
     return hits[:n]
 
 
-def search_ddg_html(session, query, n, region):
+def search_ddg_html(session, query, n, region, page=1):
+    data = {"q": query, "b": "", "l": region}
+    if page > 1:
+        data["s"] = str(10 + (page - 2) * 15)
     try:
-        r = session.post(DDG_URL, data={"q": query, "b": "", "l": region},
+        r = session.post(DDG_URL, data=data,
                          headers=_FETCH_HEADERS, timeout=20)
     except requests.RequestException as e:
         raise SearchError(f"DuckDuckGo could not be reached ({type(e).__name__})")
@@ -916,22 +970,39 @@ class AIClient:
             return (r.json().get("message") or {}).get("content", "")
         raise RuntimeError("AI mode is off")
 
-    def write_queries(self, description, wanted, include_sites, limit=6):
-        system = ("You write web search queries. Reply with a JSON array of "
-                  "strings and nothing else.")
+    def other_wordings(self, description, limit=3):
+        """Other ways the same thing is commonly worded or titled.
+
+        This is what a model is good for here. Asked to write whole search
+        queries, a small local model reaches for operators it half
+        understands (site:google.com, the word "quotes") and wastes the
+        searches; asked only for synonyms and title patterns it adds real
+        reach, and the engine puts the operators on itself."""
+        system = ("You help people find things with a web search engine. "
+                  "Reply with a JSON array of strings and nothing else.")
         user = (
-            f"Someone is looking for this on the web:\n\n{description}\n\n"
-            f"They want: {wanted}.\n"
-            + (f"Only these sites: {', '.join(include_sites)} (use site:).\n"
-               if include_sites else "")
-            + f"Write up to {limit} different search-engine queries most likely "
-              "to surface it. Use operators such as filetype:pdf, quotes and "
-              "site: where they help. Vary the wording between queries.")
-        data = _json_from(self.complete(system, user, 600))
-        out = []
+            "Someone typed this into a search box:\n\n"
+            f"{description}\n\n"
+            f"Give up to {limit} other ways the SAME thing is commonly worded "
+            "or titled: synonyms, the usual title pattern for that kind of "
+            "thing, another spelling. Each must be a short plain phrase of 2 "
+            "to 6 words that could appear in the title of what they want. "
+            "Keep every name from the original. No search operators, no "
+            "site names, no quotation marks, no file types.\n"
+            'Example: for "polo owners manual" a good reply is '
+            '["polo owner handbook", "polo instruction manual", "polo user guide"]')
+        data = _json_from(self.complete(system, user, 300))
+        out, seen = [], {norm(description)}
         for q in data:
-            if isinstance(q, str) and q.strip() and q.strip() not in out:
-                out.append(" ".join(q.split()))
+            if not isinstance(q, str):
+                continue
+            words = [w.strip("\"'\u201c\u201d.,;") for w in q.split()
+                     if ":" not in w and not w.startswith("-")]
+            words = [w for w in words if w and w.lower() not in TYPE_WORDS]
+            phrase = " ".join(words[:8])
+            if len(words) >= 2 and norm(phrase) not in seen:
+                seen.add(norm(phrase))
+                out.append(phrase)
         return out[:limit]
 
     def judge(self, description, cands):
@@ -1002,6 +1073,12 @@ class FindEngine:
         self._csv_lock = threading.Lock()
         self._name_lock = threading.Lock()
         self._src_fails = {}           # search source -> failures in a row
+        self._stats_lock = threading.Lock()
+        self.stats = {}                # what happened to the results checked
+        self._seen_pages = set()       # pages already read (for "one deeper")
+        self._deep_left = 0            # extra pages "one deeper" may still read
+        self.deeper = False
+        self.alt_specs = []
         self._pw = self._pw_browser = self._pw_page = None
         self._pw_failed = ""
         self.retry_wait = 20.0         # seconds to sit out a "slow down"
@@ -1056,11 +1133,54 @@ class FindEngine:
         if at > now:
             self._sleep(at - now)
 
-    def _get(self, url, **kw):
+    def _bump(self, what, by=1):
+        with self._stats_lock:
+            self.stats[what] = self.stats.get(what, 0) + by
+
+    def _request(self, method, url, **kw):
         self._wait_host(urlparse(url).hostname or "")
         kw.setdefault("stream", True)
         kw.setdefault("timeout", (10, 25))
-        return self.session.get(url, **kw)
+        kw.setdefault("allow_redirects", True)
+        return self.session.request(method, url, **kw)
+
+    def _get(self, url, method="GET", **kw):
+        """Fetch an address, with the two repairs that rescue results which
+        would otherwise be thrown away:
+
+        404 and a "+" in the path - asked for again with "%20" (see
+            plus_fixed); the answer's .url is then the address that works.
+        403 - asked for once more looking like an ordinary browser, which is
+            all many servers want. A real refusal (a login wall, a lending
+            library's restricted file) still comes back 403 and is left be.
+        """
+        r = self._request(method, url, **kw)
+        retry_url, retry_kw, what = None, kw, ""
+        if r.status_code == 404:
+            retry_url, what = plus_fixed(url), "repaired"
+        elif r.status_code == 403:
+            headers = dict(kw.get("headers") or {})
+            headers["User-Agent"] = BROWSER_UA
+            retry_url, retry_kw, what = url, dict(kw, headers=headers), "unblocked"
+        if retry_url:
+            try:
+                r2 = self._request(method, retry_url, **retry_kw)
+            except requests.RequestException:
+                return r
+            if r2.status_code < 400:
+                r.close()
+                self._bump(what)
+                return r2
+            r2.close()
+        return r
+
+    def _page_first_time(self, url):
+        key = self.sh.normalize_url(url)
+        with self._seen_lock:
+            if key in self._seen_pages:
+                return False
+            self._seen_pages.add(key)
+            return True
 
     def _next_id(self):
         with self._seen_lock:
@@ -1106,17 +1226,19 @@ class FindEngine:
         region = self.s.get("region") or "uk-en"
         sources = []
         if ddgs_version():
-            sources.append(("ddgs", lambda q, n: search_ddgs(q, n, region)))
+            sources.append(("ddgs", lambda q, n, pg: search_ddgs(q, n, region, pg)))
+        ss = self.search_session
         sources += [
-            ("bing", lambda q, n: search_bing_html(self.search_session, q, n, region)),
-            ("brave", lambda q, n: search_brave_html(self.search_session, q, n, region)),
-            ("browser", lambda q, n: self._search_browser(q, n, region)),
-            ("duckduckgo", lambda q, n: search_ddg_html(self.search_session, q, n, region)),
+            ("bing", lambda q, n, pg: search_bing_html(ss, q, n, region, pg)),
+            ("brave", lambda q, n, pg: search_brave_html(ss, q, n, region, pg)),
+            ("browser", lambda q, n, pg: self._search_browser(q, n, region, pg)),
+            ("duckduckgo", lambda q, n, pg: search_ddg_html(ss, q, n, region, pg)),
         ]
         return sources
 
-    def _search_once(self, query, n):
-        """One query. Returns (hits, name of the source that answered).
+    def _search_once(self, query, n, page=1):
+        """One page of one query. Returns (hits, name of the source that
+        answered).
 
         With a Brave key that is the only source. Otherwise the free ones
         are tried in turn until one returns something. A source that has
@@ -1128,8 +1250,8 @@ class FindEngine:
         key = (self.s.get("brave_key") or "").strip()
         if provider == "brave" and key:
             region = self.s.get("region") or "uk-en"
-            return (search_brave_api(self.search_session, key, query, n, region),
-                    "brave api")
+            return (search_brave_api(self.search_session, key, query, n,
+                                     region, page), "brave api")
 
         sources = self._source_list()
         live = [src for src in sources if self._src_fails.get(src[0], 0) < 2]
@@ -1141,7 +1263,7 @@ class FindEngine:
             if self.stop.is_set():
                 break
             try:
-                hits = fn(query, n)
+                hits = fn(query, n, page)
             except RateLimited as e:
                 self._src_fails[name] = self._src_fails.get(name, 0) + 1
                 limited.append(str(e))
@@ -1168,11 +1290,11 @@ class FindEngine:
             raise RateLimited("every free search source turned the request away")
         return [], ""
 
-    def _search(self, query, n):
-        """One query, with one patient retry if every source says slow down.
-        Returns (hits, source)."""
+    def _search(self, query, n, page=1):
+        """One page of one query, with one patient retry if every source says
+        slow down. Returns (hits, source)."""
         try:
-            return self._search_once(query, n)
+            return self._search_once(query, n, page)
         except RateLimited as e:
             wait = self.retry_wait
             self.log(f"   {e}. Waiting {wait:.0f} seconds, then one more try…")
@@ -1181,7 +1303,7 @@ class FindEngine:
             if not self._sleep(wait):
                 return [], ""
             try:
-                return self._search_once(query, n)
+                return self._search_once(query, n, page)
             except RateLimited:
                 self.log("   still being turned away - skipping this query.")
                 self.rate_limited = True
@@ -1216,13 +1338,13 @@ class FindEngine:
                 raise SearchError(self._pw_failed)
         return self._pw_page
 
-    def _search_browser(self, query, n, region):
+    def _search_browser(self, query, n, region, page_no=1):
         from urllib.parse import urlencode
         page = self._browser_page()
         pages = (
-            ("bing", BING_URL + "?" + urlencode(_bing_params(query, region)),
+            ("bing", BING_URL + "?" + urlencode(_bing_params(query, region, page_no)),
              "li.b_algo", parse_bing_html),
-            ("brave", BRAVE_URL + "?" + urlencode({"q": query, "source": "web"}),
+            ("brave", BRAVE_URL + "?" + urlencode(_brave_params(query, page_no)),
              "div[data-type='web']", parse_brave_html),
         )
         blocked = []
@@ -1285,7 +1407,11 @@ class FindEngine:
         want_pages = bool(job.get("want_pages"))
         self.want_pages = want_pages
         self.inside = bool(job.get("inside", True))
+        self.deeper = bool(job.get("deeper", True)) and self.inside
         max_check = max(1, int(job.get("max_check") or 40))
+        self._deep_left = max_check     # "one deeper" may read this many more
+        self.stats = {}
+        self.alt_specs = []
         ai = AIClient(self.s)
 
         wanted_words = sorted(self.cats) + sorted(self.extra_exts - set(
@@ -1313,17 +1439,21 @@ class FindEngine:
                 self.log(f"AI help is not available: {e}")
                 self.log("Carrying on with the keyword search.")
                 ai.mode = "off"
+        wordings = []
         if ai.enabled:
-            self.emit("status", "Asking the AI to write the searches…")
+            self.emit("status", "Asking the AI for other ways to word it…")
             try:
-                queries = ai.write_queries(spec.raw, ", ".join(wanted_words), include)
-                self.log(f"AI ({ai.label}) wrote {len(queries)} search(es).")
+                wordings = ai.other_wordings(spec.plain_text)
+                if wordings:
+                    self.log(f"AI ({ai.label}) - also searching for: "
+                             + " | ".join(wordings))
+                    self.alt_specs = [Spec(w) for w in wordings]
             except Exception as e:
-                self.log(f"AI could not write the searches ({e}) - "
-                         "using the keyword ones.")
-        if not queries:
-            queries = build_queries(spec, self.cats, sorted(self.extra_exts),
-                                    include, exclude, want_pages)
+                self.log(f"AI could not suggest other wordings ({e}) - "
+                         "searching for the description as typed.")
+        queries = build_queries(spec, self.cats, sorted(self.extra_exts),
+                                include, exclude, want_pages,
+                                limit=6 + 2 * len(wordings), wordings=wordings)
         key = (self.s.get("brave_key") or "").strip()
         if self.s.get("provider") == "brave" and key:
             source = "Brave Search API"
@@ -1334,21 +1464,50 @@ class FindEngine:
         self.log(f"Search source: {source}")
 
         # --- search ---------------------------------------------------------
-        per_query = max(10, min(30, -(-max_check * 3 // (2 * len(queries)))))
+        # A search engine gives about ten results a page, and the first page
+        # of one query is rarely enough to fill "Results to check" - so each
+        # query is followed onto further pages until it has given its share
+        # or runs dry. Twice as many are gathered as will be checked: the
+        # surplus is what lets the weak ones be dropped below.
+        per_query = max(10, -(-max_check * 2 // len(queries)))
+        max_pages = (1 if max_check <= 20 else 2 if max_check <= 40
+                     else 3 if max_check <= 80 else 4)
         per_q_hits = []
         for qi, q in enumerate(queries):
             if self.stop.is_set():
                 break
             self.emit("status", f"Searching ({qi + 1}/{len(queries)}): {q}")
             self.emit("progress", (qi, len(queries)))
-            try:
-                hits, via = self._search(q, per_query)
-            except SearchError as e:
-                self.log(f"   ✗ search failed: {q} — {e}")
-                hits, via = [], ""
-            self.log(f"   {len(hits):>3} result(s)  ←  {q}"
-                     + (f"   [{via}]" if via and hits else ""))
-            per_q_hits.append(hits)
+            got, seen_q, vias, pages_read = [], set(), [], 0
+            for page in range(1, max_pages + 1):
+                if self.stop.is_set():
+                    break
+                if page > 1:
+                    self.emit("status", f"Searching ({qi + 1}/{len(queries)}), "
+                                        f"page {page}: {q}")
+                    self._sleep(random.uniform(*self.search_pause))
+                try:
+                    hits, via = self._search(q, 30, page)
+                except SearchError as e:
+                    self.log(f"   ✗ search failed: {q} — {e}")
+                    hits, via = [], ""
+                fresh = []
+                for h in hits:
+                    k = self.sh.normalize_url(h["url"])
+                    if k not in seen_q:
+                        seen_q.add(k)
+                        fresh.append(h)
+                pages_read += 1
+                if via and fresh and via not in vias:
+                    vias.append(via)
+                got.extend(fresh)
+                if not fresh or len(got) >= per_query:
+                    break
+            self.log(f"   {len(got):>3} result(s)  ←  {q}"
+                     + (f"   [{', '.join(vias)}"
+                        + (f", {pages_read} pages" if pages_read > 1 else "")
+                        + "]" if got else ""))
+            per_q_hits.append(got)
             if qi + 1 < len(queries):
                 self._sleep(random.uniform(*self.search_pause))   # pace them
 
@@ -1400,8 +1559,14 @@ class FindEngine:
                         if self.rate_limited else
                         " Try fewer or different words."))
             return
-        hits = hits[:max_check]
-        self.log(f"Checking {len(hits)} result(s) against the description…")
+        found = len(hits)
+        hits = self._best_first(hits, max_check, bool(include))
+        self.log(f"{found} different result(s) in all. Checking the "
+                 f"{len(hits)} most promising against the description…"
+                 if found > len(hits) else
+                 f"Checking {len(hits)} result(s) against the description…")
+        for h in hits:
+            self._page_first_time(h["url"])
 
         # --- check ----------------------------------------------------------
         items = []
@@ -1425,10 +1590,67 @@ class FindEngine:
                         f.cancel()
         summary["checked"] = done
         summary["results"] = len(items)
+        st = self.stats
+        notes = [f"{len(items)} match(es) from {done} result(s) checked"]
+        for key, text in (("deep", "page(s) followed one link deeper"),
+                          ("repaired", "address(es) repaired"),
+                          ("unblocked", "let in on a second, browser-like try"),
+                          ("dead", "dead link(s)"),
+                          ("refused", "refused by the site"),
+                          ("failed", "could not be read")):
+            if st.get(key):
+                notes.append(f"{st[key]} {text}")
+        self.log(" · ".join(notes))
 
         # --- AI second opinion ---------------------------------------------
         if ai.enabled and items and not self.stop.is_set():
             self._ai_judge(ai, spec, items)
+
+    def _best_first(self, hits, max_check, sites_given):
+        """Choose which search results get checked, best first.
+
+        They arrive interleaved (every query's first result, then every
+        query's second...). Before any site is visited each is scored on what
+        the search engine said about it - title, snippet, address - so the
+        ones that already look right are checked first and, when there are
+        more than "Results to check", it is the weak ones that are left out.
+        One site may not take more than its share, or a run of near-identical
+        pages from one forum crowds everything else out."""
+        specs = [self.spec] + list(self.alt_specs)
+        per_host = max(4, max_check // 5)
+        by_host, kept, overflow = {}, [], []
+        scored = []
+        for order, h in enumerate(hits):
+            if h.get("source") == "ddgs images":
+                scored.append((100, order, h))
+                continue
+            try:
+                parsed = urlparse(h["url"])
+            except ValueError:
+                continue
+            fields = {"title": (h["title"], 1.0), "name": (parsed.path, 1.0),
+                      "snippet": (h["snippet"], 0.7),
+                      "site": (parsed.hostname or "", 0.4)}
+            best = max(score_candidate(sp, fields)[0] for sp in specs)
+            if best == 0 and self.spec.excluded and score_candidate(
+                    self.spec, fields)[1].startswith("contains the excluded"):
+                continue
+            ext = self.url_ext(h["url"])
+            if ext and self.wants_ext(ext):
+                best += 15              # it IS a file of a wanted type
+            scored.append((best, order, h))
+        scored.sort(key=lambda t: (-(t[0] // 10), t[1]))    # bands of ten
+        for best, order, h in scored:
+            host = self.sh.base_domain(urlparse(h["url"]).hostname or "")
+            if not sites_given and by_host.get(host, 0) >= per_host:
+                # Over its share. A strong one may still fill a spare slot;
+                # a weak one is not worth the visit even if there is room.
+                if best >= 30:
+                    overflow.append(h)
+                continue
+            by_host[host] = by_host.get(host, 0) + 1
+            kept.append(h)
+        return (kept + overflow)[:max_check]
 
     def _ai_judge(self, ai, spec, items):
         ranked = sorted(items, key=lambda it: -it["score"])[:AI_JUDGE_CAP]
@@ -1476,13 +1698,15 @@ class FindEngine:
         """Ask a server what an address really is without downloading it:
         HEAD first, and a GET that is closed after the headers if HEAD is
         refused. Returns (final_url, headers, status) - status 0 on a
-        connection failure."""
-        host = urlparse(url).hostname or ""
+        connection failure. Both go through _get(), so a "+"-for-space
+        address comes back repaired."""
         try:
-            self._wait_host(host)
-            r = self.session.head(url, allow_redirects=True, timeout=(10, 15))
-            if r.status_code < 400 and r.headers.get("Content-Type"):
-                return r.url, r.headers, r.status_code
+            r = self._get(url, method="HEAD", timeout=(10, 15))
+            try:
+                if r.status_code < 400 and r.headers.get("Content-Type"):
+                    return r.url, r.headers, r.status_code
+            finally:
+                r.close()
         except requests.RequestException:
             pass
         try:
@@ -1533,6 +1757,7 @@ class FindEngine:
         if ext and ext not in self.sh.PAGE_EXTS and self.wants_ext(ext):
             final, headers, status = self._probe(url)
             if status in (404, 410):
+                self._bump("dead")
                 self.log(f"   ✗ dead link ({status}): {url}")
                 return []
             if not self._is_html(headers):
@@ -1559,16 +1784,23 @@ class FindEngine:
 
         return self._check_page(hit)
 
-    def _check_page(self, hit):
+    def _check_page(self, hit, depth=0):
         url = hit["url"]
         spec = self.spec
         try:
             r = self._get(url)
         except requests.RequestException as e:
+            self._bump("failed")
             self.log(f"   ✗ could not open {url} — {type(e).__name__}")
             return []
         try:
             if r.status_code >= 400:
+                if r.status_code in (404, 410):
+                    self._bump("dead")
+                elif r.status_code in (401, 403, 429, 451):
+                    self._bump("refused")
+                else:
+                    self._bump("failed")
                 self.log(f"   ✗ {r.status_code} from {url}")
                 return []
             final = r.url
@@ -1609,6 +1841,8 @@ class FindEngine:
             title = " ".join(soup.title.string.split())
         title = title or hit["title"]
         links = self._collect_file_links(soup, final) if self.inside else []
+        onward = (self._promising_links(soup, final)
+                  if self.deeper and depth == 0 else [])
         for tag in soup(["script", "style", "noscript", "svg", "template"]):
             tag.decompose()
         text = soup.get_text(" ", strip=True)[:30000]
@@ -1647,7 +1881,64 @@ class FindEngine:
                 _excerpt=f"linked from the page \"{title}\" as \"{label}\"")
             self.emit("result", item)
             out.append(item)
+
+        # One page deeper. A search result is very often the page ABOUT the
+        # file - a catalogue entry, a "downloads" index - with the file
+        # itself one click further on. The links on this page that look
+        # most like that click are followed, once, within a budget.
+        for sub in onward:
+            if self.stop.is_set():
+                break
+            with self._seen_lock:
+                if self._deep_left <= 0:
+                    break
+                self._deep_left -= 1
+            if not self._page_first_time(sub["url"]):
+                continue
+            self._bump("deep")
+            try:
+                out.extend(self._check_page(sub, depth=1))
+            except Exception:
+                self._bump("failed")
         return out
+
+    def _promising_links(self, soup, base):
+        """Up to three links on a page worth following once: ones whose own
+        text or address matches what is being looked for, or that say
+        "download" / "PDF" / "full text" and at least partly match."""
+        try:
+            base_tag = soup.find("base", href=True)
+            if base_tag:
+                base = urljoin(base, base_tag["href"])
+        except Exception:
+            pass
+        specs = [self.spec] + list(self.alt_specs)
+        found, seen = [], set()
+        for a in soup.find_all("a", href=True):
+            raw = a["href"].strip()
+            if not raw or raw.startswith(("#", "javascript:", "mailto:", "data:", "tel:")):
+                continue
+            try:
+                full = urljoin(base, raw).split("#")[0]
+                parsed = urlparse(full)
+            except ValueError:
+                continue
+            if parsed.scheme not in ("http", "https") or full in seen or full == base:
+                continue
+            seen.add(full)
+            ext = self.url_ext(full) or self.sh.get_extension(full)
+            if ext and ext not in self.sh.PAGE_EXTS:
+                continue                    # a file - handled as a file
+            label = " ".join((a.get_text(" ", strip=True) or a.get("title") or "").split())[:200]
+            fields = {"link": (label, 1.0), "name": (parsed.path, 1.0)}
+            score = max(score_candidate(sp, fields)[0] for sp in specs)
+            hint = bool(DEEPER_HINT_RE.search(label) or DEEPER_PATH_RE.search(parsed.path))
+            if score >= 60 or (hint and score >= 30):
+                found.append((score + (25 if hint else 0), len(found),
+                              {"url": full, "title": label, "snippet": "",
+                               "source": "one deeper"}))
+        found.sort(key=lambda t: (-t[0], t[1]))
+        return [h for _s, _i, h in found[:DEEPER_PER_PAGE]]
 
     def _collect_file_links(self, soup, base):
         """Every wanted file a page links to: (url, label, ext)."""

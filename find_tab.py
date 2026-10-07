@@ -141,9 +141,14 @@ class FindTab(ttk.Frame):
         self.auto_var = tk.StringVar(value=self._one_of(
             s.get("auto"), AUTO_OPTIONS, "Off"))
         combo("Auto-download from score", self.auto_var, AUTO_OPTIONS, 6)
+        boxes = ttk.Frame(opts)
+        boxes.pack(side="left")
         self.inside_var = tk.BooleanVar(value=bool(s.get("inside", True)))
-        ttk.Checkbutton(opts, text="Look inside result pages for files",
-                        variable=self.inside_var).pack(side="left", pady=(14, 0))
+        ttk.Checkbutton(boxes, text="Look inside result pages for files",
+                        variable=self.inside_var).pack(anchor="w")
+        self.deeper_var = tk.BooleanVar(value=bool(s.get("deeper", True)))
+        ttk.Checkbutton(boxes, text="…and follow promising links one page deeper",
+                        variable=self.deeper_var).pack(anchor="w")
 
         # --- save to --------------------------------------------------------
         ttk.Label(self, text="Save to folder (a Find/<search> folder is made inside)"
@@ -356,6 +361,7 @@ class FindTab(ttk.Frame):
         s["types"] = [c for c, v in self.type_vars.items() if v.get()]
         s["pages"] = bool(self.pages_var.get())
         s["inside"] = bool(self.inside_var.get())
+        s["deeper"] = bool(self.deeper_var.get())
         s["include"] = self.include_var.get().strip()
         s["exclude"] = self.exclude_var.get().strip()
         s["extra_exts"] = self.exts_var.get().strip()
@@ -447,6 +453,7 @@ class FindTab(ttk.Frame):
             "extra_exts": self.exts_var.get(),
             "include": self.include_var.get(), "exclude": self.exclude_var.get(),
             "want_pages": self.pages_var.get(), "inside": self.inside_var.get(),
+            "deeper": self.deeper_var.get(),
             "max_check": self.max_check_var.get(),
         }
         self.stop_event = threading.Event()
