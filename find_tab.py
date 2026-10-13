@@ -307,7 +307,7 @@ class FindTab(ttk.Frame):
 
     # --------------------------------------------------------------- theme
     def apply_theme(self, pal, mono):
-        """Called by the app whenever light/dark changes (and once at start)."""
+        """Called by the app whenever the theme changes (and once at start)."""
         self.pal = pal
         self.desc_text.configure(
             background=pal["field"], foreground=pal["field_text"],

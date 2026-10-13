@@ -35,7 +35,7 @@ here is either called by that launcher or is the optional standalone build.
 | `build-app.command` | – | optional: double-click to build | Makes a standalone `dist/Site Harvester.app` |
 | `site_harvester.py` | the app | the app | The whole program; the launchers run it, or `python site_harvester.py` by hand |
 | `find_tab.py`, `find_engine.py` | used by the app | used by the app | The Find tab: the window and the search/check/download work behind it. Delete both and the app opens without the tab |
-| `theme.py` | used by the app | used by the app | The light/dark palettes and widget styling (shared with my other desktop apps) |
+| `theme.py` | used by the app | used by the app | The Phosphor purple / Dark / Light palettes and widget styling (shared with my other desktop apps) |
 | `site_harvester_app.py` | bundled by the builder | bundled by the builder | Start-up wrapper inside the standalone builds (adds the `selftest` and crash log) - not for running by hand |
 | `requirements.txt` | used by setup | used by setup | The Python libraries it needs |
 | `requirements-fallback.txt` | optional | optional | WeasyPrint, the lower-fidelity PDF fallback (see below) |
@@ -130,7 +130,7 @@ to itself.
 
 - `site_harvester.py` — the app itself
 - `find_tab.py`, `find_engine.py` — the Find tab
-- `theme.py` — its light/dark palettes and widget styling
+- `theme.py` — its Phosphor purple / Dark / Light palettes and widget styling
 - `run.bat` / `run.command` — launchers (build an environment, then start it)
 - `build-exe.bat` / `build-app.command` — optional standalone builders
 - `site_harvester_app.py` — the start-up wrapper those builders bundle
@@ -198,7 +198,7 @@ as it is visited (with its depth) and every file as it saves; with more than
 one site running each line is prefixed with the site it belongs to. It keeps
 the last 4,000 lines.
 
-The **View** menu has Dark mode (`Ctrl+D`); the choice is remembered. The
+The **View** menu picks the theme (`Ctrl+D` cycles them); the choice is remembered. The
 other crawl options start from their defaults every time the app opens.
 
 Everything is saved into a folder named after the website — one per address
@@ -538,8 +538,8 @@ rather than failing, and the log tells you how to install it
 
 ## Good to know
 
-- **Dark mode is the default.** View → Dark mode (or `Ctrl+D`) switches to the
-  light look and back; the choice is remembered in `site_harvester_ui.json`
+- **Phosphor purple is the default** (the same look as Winnow). The View menu
+  picks Phosphor purple, Dark or Light, and `Ctrl+D` cycles them; the choice is remembered in `site_harvester_ui.json`
   next to the app.
 - **Stay on this domain** is the default so it doesn't wander onto other sites.
   Subdomains (`www.`, `blog.`, etc.) count as the same domain, for pages and

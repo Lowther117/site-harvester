@@ -83,10 +83,10 @@ from tkinter import ttk, filedialog, messagebox
 import theme
 
 # --------------------------------------------------------------------------- #
-# Appearance: light and dark mode.
+# Appearance: the house themes - Phosphor purple, Dark and Light.
 #
-# Dark is the default. The View menu (or Ctrl+D) switches at runtime, and the
-# choice is remembered in a small file next to the app. The palettes and the
+# Phosphor purple (Winnow's look) is the default. The View menu picks one and
+# Ctrl+D cycles Phosphor -> Dark -> Light at runtime; the choice is remembered in a small file next to the app. The palettes and the
 # ttk styling live in theme.py, shared with the other desktop apps.
 # --------------------------------------------------------------------------- #
 
@@ -105,14 +105,10 @@ def _load_ui_settings():
         return {}
 
 
-def load_dark():
-    """True for dark mode - whatever was chosen last time, dark by default.
-    An older settings file held "theme": light/dark/system; "light" is the
-    only value there that means anything now."""
-    data = _load_ui_settings()
-    if isinstance(data.get("dark"), bool):
-        return data["dark"]
-    return data.get("theme") != "light"
+def load_theme():
+    """The theme chosen last time - phosphor, dark or light - phosphor by
+    default. Older files held only "dark": true/false (false stays light)."""
+    return theme.from_settings(_load_ui_settings())
 
 
 def _save_ui_settings(data):
@@ -124,10 +120,10 @@ def _save_ui_settings(data):
         pass
 
 
-def save_dark(dark):
+def save_theme(name):
     data = _load_ui_settings()
-    data.pop("theme", None)
-    data["dark"] = bool(dark)
+    data["theme"] = theme.resolve(name)
+    data["dark"] = theme.is_dark(name)
     _save_ui_settings(data)
 
 
@@ -2434,7 +2430,7 @@ class App(tk.Tk):
         self.site_status = {}   # tag -> {pages, queued, files}
         self.labels = {}        # tag -> short display label
 
-        self.dark_var = tk.BooleanVar(value=load_dark())
+        self.theme_var = tk.StringVar(value=load_theme())
         self._build_menu()
         self._build_ui()
         self._apply_theme()
@@ -2471,30 +2467,27 @@ class App(tk.Tk):
                                    command=self._reset_default_save_dir)
         self.menubar.add_cascade(label="File", menu=self.file_menu)
         self.view_menu = tk.Menu(self.menubar, tearoff=0)
-        self.view_menu.add_checkbutton(label="Dark mode", accelerator="Ctrl+D",
-                                       variable=self.dark_var,
-                                       command=self._theme_chosen)
+        for key in theme.ORDER:
+            self.view_menu.add_radiobutton(label=theme.label(key), value=key,
+                                           variable=self.theme_var,
+                                           command=self._theme_chosen)
+        self.view_menu.add_separator()
+        self.view_menu.add_command(label="Next theme", accelerator="Ctrl+D",
+                                   command=self._toggle_dark)
         self.menubar.add_cascade(label="View", menu=self.view_menu)
         self.config(menu=self.menubar)
 
     def _toggle_dark(self):
-        self.dark_var.set(not self.dark_var.get())
+        self.theme_var.set(theme.next_theme(self.theme_var.get()))
         self._theme_chosen()
 
     def _theme_chosen(self):
-        save_dark(self.dark_var.get())
+        save_theme(self.theme_var.get())
         self._apply_theme()
 
     def _apply_theme(self):
-        dark = bool(self.dark_var.get())
-        pal = theme.apply(self, dark)
+        pal = theme.apply(self, self.theme_var.get())
         mono = theme.mono_family(self)
-        style = ttk.Style(self)
-        # The reference module has no progress-bar style; the trough must be
-        # a different shade from the panel behind it or the bar vanishes.
-        style.configure("Horizontal.TProgressbar", background=pal["accent"],
-                        troughcolor=pal["field"], bordercolor=pal["border"],
-                        lightcolor=pal["accent"], darkcolor=pal["accent"])
         # Menus are classic Tk widgets that ttk styles never reach.
         for m in (self.menubar, self.file_menu, self.view_menu):
             try:
