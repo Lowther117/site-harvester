@@ -131,6 +131,13 @@ TYPE_WORDS = {
     "txt": ["txt"],
 }
 
+# Type words that are also ordinary words ("ISO 9001", "the last word",
+# "Excel formulas", "zip code"). They only count as a file type when they
+# end the description or sit next to one of FORMAT_WORDS ("word document",
+# "zip file"); anywhere else they are searched for like any other word.
+AMBIGUOUS_TYPE_WORDS = {"iso", "word", "zip", "excel", "doc"}
+FORMAT_WORDS = {"file", "files", "format", "formats", "document", "documents"}
+
 # Which extensions get their own "filetype:" query, most useful first.
 QUERY_EXTS = {
     "Documents": ["pdf", "docx", "xlsx", "pptx", "epub"],
@@ -194,10 +201,12 @@ class Spec:
                 self.phrases.append(phrase)
         unquoted = re.sub(r'-?"[^"]*"', " ", text)
         seen = set()
-        for tok in unquoted.split():
+        toks = unquoted.split()
+        words = [re.sub(r"['’]s$", "", t.lstrip("-").strip(".,;:!?()[]{}'‘’“”").lower())
+                 for t in toks]
+        for i, tok in enumerate(toks):
             neg = tok.startswith("-") and len(tok) > 1
-            word = tok.lstrip("-").strip(".,;:!?()[]{}'‘’“”")
-            word = re.sub(r"['’]s$", "", word.lower())
+            word = words[i]
             if not word:
                 continue
             if neg:
@@ -205,7 +214,12 @@ class Spec:
                 if n and n not in self.excluded:
                     self.excluded.append(n)
                 continue
-            if word in TYPE_WORDS:
+            if word in AMBIGUOUS_TYPE_WORDS and not (
+                    i == len(toks) - 1
+                    or (i > 0 and words[i - 1] in FORMAT_WORDS)
+                    or (i + 1 < len(toks) and words[i + 1] in FORMAT_WORDS)):
+                pass                        # an ordinary word here - scored below
+            elif word in TYPE_WORDS:
                 for e in TYPE_WORDS[word]:
                     if e not in self.hinted_exts:
                         self.hinted_exts.append(e)
@@ -572,14 +586,24 @@ def parse_brave_html(html):
     return hits
 
 
+def _csv_safe(value):
+    """A CSV cell Excel will show as text, not run as a formula: titles and
+    addresses come from the web, and one starting with = + - or @ would
+    otherwise be evaluated when the results list is opened."""
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@"):
+        return "'" + value
+    return value
+
+
 def _unwrap_ddg(href):
     """DuckDuckGo's HTML page links through //duckduckgo.com/l/?uddg=<url>."""
     if href.startswith("//"):
         href = "https:" + href
     p = urlparse(href)
     if p.hostname and p.hostname.endswith("duckduckgo.com") and p.path.startswith("/l/"):
-        target = parse_qs(p.query).get("uddg", [""])[0]
-        return unquote(target) if target else ""
+        # parse_qs() has already decoded it once; decoding again would turn
+        # a real %20 or %2F in the target address into a different address.
+        return parse_qs(p.query).get("uddg", [""])[0]
     if p.hostname and p.hostname.endswith("duckduckgo.com") and p.path.startswith("/y.js"):
         return ""                                   # an advert
     return href
@@ -810,9 +834,9 @@ def start_ollama(base, stop=None, wait=30):
     exe = find_ollama()
     if not exe:
         raise RuntimeError(
-            "Ollama is not installed on this computer. Run the build script "
-            "(build-app.command / build-exe.bat), which installs it, or get "
-            "it from https://ollama.com")
+            "Ollama is not installed on this computer. Get it from "
+            "https://ollama.com, or run the build script (build-app.command "
+            "/ build-exe.bat) with HARVESTER_WITH_AI=1 set, which installs it")
     kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
               "stderr": subprocess.DEVNULL}
     if sys.platform.startswith("win"):
@@ -2171,10 +2195,10 @@ class FindEngine:
                     if new:
                         w.writerow(["saved", "file", "score", "why", "address",
                                     "found on", "looking for"])
-                    w.writerow([
+                    w.writerow([_csv_safe(c) for c in (
                         datetime.datetime.now().isoformat(timespec="seconds"),
                         os.path.relpath(item["dest"], job_dir), item["score"],
                         item["reason"], item["url"], item.get("source", ""),
-                        getattr(self, "description", "")])
+                        getattr(self, "description", ""))])
         except Exception:               # the file is saved; the list is a nicety
             pass

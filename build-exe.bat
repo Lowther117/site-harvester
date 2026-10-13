@@ -93,18 +93,24 @@ rem on this PC, and the model itself.
 rem
 rem Neither goes INSIDE the build - the model alone is about 2 GB and belongs
 rem to Ollama, which keeps it in the user profile for every program that uses
-rem it. They are installed here so that a freshly built app has AI help ready
-rem to switch on under Find, Settings, AI help. The app starts Ollama by
-rem itself when it is needed, and fetches the model by itself on a PC that
-rem does not have it yet.
+rem it. AI help is off by default in the app, so this step is opt-in too:
+rem a normal build does not install a program and download 2 GB for a
+rem feature that may never be switched on. Asked for, it installs both so a
+rem freshly built app has AI help ready under Find, Settings, AI help. The
+rem app starts Ollama by itself when it is needed, and fetches the model by
+rem itself on a PC that does not have it yet.
 rem
 rem Optional like the two above: a failure is a warning, and the Find tab
 rem then works on the words in the description as before.
-rem   set HARVESTER_SKIP_AI=1        before running this leaves the step out
+rem   set HARVESTER_WITH_AI=1        before running this adds the step
 rem   set HARVESTER_AI_MODEL=name    downloads a different model
 echo    AI help for the Find tab ^(Ollama and its model^)...
 set "AI_MODEL=llama3.2"
 if defined HARVESTER_AI_MODEL set "AI_MODEL=%HARVESTER_AI_MODEL%"
+if not defined HARVESTER_WITH_AI (
+    echo    ...skipped, set HARVESTER_WITH_AI=1 first to install Ollama and its 2 GB model
+    goto :ai_done
+)
 if defined HARVESTER_SKIP_AI (
     echo    ...skipped, HARVESTER_SKIP_AI is set
     goto :ai_done

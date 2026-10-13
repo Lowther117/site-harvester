@@ -192,14 +192,16 @@ fi
 # this Mac) and the model itself.
 #
 # Neither goes INSIDE the app - the model alone is about 2 GB and belongs to
-# Ollama, which keeps it in ~/.ollama for every program that uses it. They are
-# installed here so that a freshly built app has AI help ready to switch on
-# (Find > Settings > AI help). The app starts Ollama by itself when it is
+# Ollama, which keeps it in ~/.ollama for every program that uses it. AI help
+# is off by default in the app, so this step is opt-in too: a normal build does
+# not install a program and download 2 GB for a feature that may never be
+# switched on. Asked for, it installs both so a freshly built app has AI help
+# ready (Find > Settings > AI help). The app starts Ollama by itself when it is
 # needed, and fetches the model by itself on a Mac that does not have it yet.
 #
 # Optional like the two above: a failure is a warning, and the Find tab then
 # works on the words in the description as before.
-#   HARVESTER_SKIP_AI=1 ./build-app.command      leaves this step out
+#   HARVESTER_WITH_AI=1 ./build-app.command      adds this step
 #   HARVESTER_AI_MODEL=name ./build-app.command  downloads a different model
 # --------------------------------------------------------------------------
 say "AI help for the Find tab (Ollama and its model)"
@@ -221,7 +223,9 @@ ollama_has_model() {
         | grep -qx -e "$AI_MODEL" -e "$AI_MODEL:latest"
 }
 
-if [ -n "$HARVESTER_SKIP_AI" ]; then
+if [ -z "$HARVESTER_WITH_AI" ]; then
+    echo "   skipped (run with HARVESTER_WITH_AI=1 to install Ollama and its 2 GB model)"
+elif [ -n "$HARVESTER_SKIP_AI" ]; then
     echo "   skipped (HARVESTER_SKIP_AI is set)"
 else
     OLLAMA="$(find_ollama)"

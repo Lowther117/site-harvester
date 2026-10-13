@@ -933,7 +933,8 @@ class SettingsWindow(tk.Toplevel):
              "against your description, so loose wording works. Off is free "
              "and needs nothing. Ollama is "
              + ("installed on this computer" if fe.find_ollama() else
-                "NOT installed yet - the build script installs it")
+                "NOT installed yet - get it from ollama.com, or build with "
+                "HARVESTER_WITH_AI=1")
              + "; the app starts it and fetches the model by itself.")
         choice("ai", "AI help", AI_LABELS)
         entry("anthropic_key", "Anthropic API key", show="•")

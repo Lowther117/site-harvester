@@ -161,6 +161,9 @@ The Harvest tab is one column of controls, top to bottom:
 3. **Sites at the same time** — `1` (the default) crawls the batch one site
    after another; `2`–`8` run that many sites in parallel, each with its own
    crawler and its own output folder. Irrelevant with a single address.
+   **Max pages per site** (beside it) stops a site's crawl after that many
+   pages — 2000 by default, *No limit* to switch it off — so a calendar or
+   an endless "next" link cannot keep a crawl going for ever.
 4. **Which links to follow**:
    - *Stay on this domain* — keeps to the site you entered, including its `www`
      and other subdomains (recommended). In this mode files are also only
@@ -221,7 +224,10 @@ SiteHarvester/
 └── another-site.org/             (the next address in the batch)
 ```
 
-A file whose name is already taken gets `_1`, `_2`, … added. If the PDF had
+A file whose name is already taken gets `_1`, `_2`, … added. Two addresses
+on the same site in one batch (`example.com/blog` and `example.com/shop`) get
+a folder each — `example.com` and `example.com_shop` (then `_2`, `_3` …) — so
+neither overwrites the other's PDF or mirror. If the PDF had
 to fall back to the basic engine there is also a `_pdf_engine.txt` note in
 the site folder saying why.
 
@@ -341,10 +347,13 @@ work
 get it, both in Settings:
 
 - **Ollama on this computer** — free and private; the model runs on your own
-  machine. The build scripts (`build-app.command` / `build-exe.bat`) install
-  [Ollama](https://ollama.com) and download the model (`llama3.2`, about
-  2 GB, once), so a freshly built app has it ready: pick it under AI help in
-  Settings. After that the app looks after it — it starts Ollama when it is
+  machine. Install [Ollama](https://ollama.com) yourself, or build with
+  `HARVESTER_WITH_AI=1` set (`set HARVESTER_WITH_AI=1` before `build-exe.bat`
+  in a Command Prompt, `HARVESTER_WITH_AI=1 ./build-app.command` in
+  Terminal) and the build scripts install Ollama and download the model
+  (`llama3.2`, about 2 GB, once) so the built app has it ready: pick it under
+  AI help in Settings. A normal build leaves this step out, since AI help is
+  off by default. After that the app looks after it — it starts Ollama when it is
   not running and fetches the model itself if it is missing, with progress in
   the log. Neither is packed *inside* the app (the model belongs to Ollama and
   lives in your user folder), so on a computer the app was copied to, Ollama
@@ -353,8 +362,8 @@ get it, both in Settings:
   Nothing to install.
 
 If the AI cannot be reached, the search carries on with the keyword queries
-and scores and says so in the log. To build without the AI step, set
-`HARVESTER_SKIP_AI=1` first; `HARVESTER_AI_MODEL=<name>` picks another model.
+and scores and says so in the log. `HARVESTER_AI_MODEL=<name>` picks another
+model for the build's AI step (`HARVESTER_SKIP_AI=1` still leaves it out).
 
 ### Politeness and limits
 
@@ -470,7 +479,11 @@ opens in any browser with no internet and no folder of files beside it:
 
 - a **sidebar** listing every captured page (the ☰ Pages button hides it)
 - each page rendered by the headless browser, then its **CSS, images and
-  fonts inlined as `data:` URIs** so nothing is fetched from the network
+  fonts inlined as `data:` URIs** so the page does not need the site to
+  display. It is not completely sealed: iframes and embedded video still
+  point at their original addresses, and a stylesheet pulled in with CSS
+  `@import` (or anything else that was not inlined) is still fetched from the
+  network when the mirror is opened online
 - the site's **own internal links rewired** to switch pages inside the mirror;
   external links open in a new tab as normal
 - scripts stripped, and cookie/consent overlays hidden the same way as in the
@@ -545,6 +558,12 @@ rather than failing, and the log tells you how to install it
   Subdomains (`www.`, `blog.`, etc.) count as the same domain, for pages and
   for files alike. Switch to *Follow links to other websites too* only when
   you really want it to go off-site.
+- **Limits that keep a crawl finite:** *Max pages per site* (2000 by
+  default); at most 50 `?query` versions of any one address are crawled
+  (calendars and filters generate endless ones); only the first 5 MB of a
+  page is read; a single file over 2 GB is skipped. Pages that answer with
+  an HTTP error (404, 500 …) are not put in the PDF/mirror and their links
+  are not followed. Each limit is logged when it kicks in.
 - It only downloads files that are actually linked in the page's HTML (or, with
   *Render JavaScript first*, that the page loads while it is open). It can't
   reach content that's hidden behind a login.

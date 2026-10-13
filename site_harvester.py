@@ -293,6 +293,16 @@ SCOPE_OPTIONS = {
 # How many sites to crawl at the same time (1 = one after another).
 CONCURRENCY_OPTIONS = ["1", "2", "3", "4", "6", "8"]
 
+# Safety limits. A calendar, a faceted search or a session id in every link
+# can hand a crawler an endless supply of "new" pages; these keep a run
+# finite. 0 in MAX_PAGES_OPTIONS means no limit.
+MAX_PAGES_OPTIONS = {"500": 500, "2000": 2000, "10000": 10000,
+                     "50000": 50000, "No limit": 0}
+DEFAULT_MAX_PAGES = 2000
+QUERY_VARIANT_CAP = 50              # most ?query versions crawled of one path
+PAGE_READ_LIMIT = 5 * 1024 * 1024   # bytes of one page read; the rest is dropped
+MAX_FILE_BYTES = 2 * 1024 ** 3      # a single download bigger than this is dropped
+
 PAGE_EXTS = {"html", "htm", "php", "asp", "aspx", "jsp", "cfm", ""}
 
 # Streaming manifests yt-dlp can turn into a real video file.
@@ -488,8 +498,10 @@ WINDOWS_RESERVED = {
 def _clean_name(name, fallback="file"):
     """Make a single filename safe on Windows, macOS and Linux."""
     name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name or "")
-    name = name.strip().rstrip(". ")
-    if name in ("", ".", ".."):
+    # Leading dots too: ".htaccess" or "..config" would be saved as a hidden
+    # file on macOS/Linux and never show up in Finder.
+    name = name.strip().rstrip(". ").lstrip(". ")
+    if not name:
         return fallback
     stem = name.split(".", 1)[0].lower()
     if stem in WINDOWS_RESERVED:
@@ -503,6 +515,29 @@ def _fs(path):
     if IS_WINDOWS and len(path) >= 248 and not path.startswith("\\\\?\\"):
         return "\\\\?\\" + os.path.abspath(path)
     return path
+
+
+def _claim_unique(dest):
+    """Create dest as an empty file - or name_1.ext, name_2.ext ... if that is
+    taken - and return the path actually claimed. The file is created with
+    "xb" (fails if it already exists), so two downloads running at the same
+    time can never both pick the same free name and overwrite each other, as
+    a check-then-open could."""
+    b, x = os.path.splitext(dest)
+    i = 0
+    while True:
+        path = dest if i == 0 else f"{b}_{i}{x}"
+        try:
+            with open(_fs(path), "xb"):
+                return path
+        except FileExistsError:
+            i += 1
+        except PermissionError:
+            # Windows answers this, not FileExistsError, when a folder of
+            # that name is in the way.
+            if not os.path.exists(_fs(path)):
+                raise
+            i += 1
 
 
 def decode_html(content, headers):
@@ -537,6 +572,89 @@ def decode_html(content, headers):
     except Exception:
         pass
     return content.decode("utf-8", "replace")
+
+
+def read_page_body(resp, abort_event=None, limit=None):
+    """Read a streamed page response, at most `limit` bytes (PAGE_READ_LIMIT
+    by default). Returns (bytes, truncated), or (None, False) if abort_event
+    was set part-way - resp.content would read an endless or enormous page
+    in full, with no way for Stop to interrupt it."""
+    limit = PAGE_READ_LIMIT if limit is None else limit
+    buf = bytearray()
+    for chunk in resp.iter_content(chunk_size=65536):
+        if abort_event is not None and abort_event.is_set():
+            return None, False
+        if chunk:
+            buf += chunk
+            if len(buf) >= limit:
+                return bytes(buf[:limit]), True
+    return bytes(buf), False
+
+
+def srcset_urls(srcset):
+    """The URLs in a srcset value. Each candidate is a URL (no spaces) plus an
+    optional "300w"/"2x" descriptor, and candidates are separated by commas -
+    but a URL may itself hold commas (Wix: .../w_150,h_178,q_80/a.jpg), so the
+    string is walked the way the HTML spec does instead of split on ","."""
+    urls, pos, n = [], 0, len(srcset or "")
+    while pos < n:
+        while pos < n and (srcset[pos].isspace() or srcset[pos] == ","):
+            pos += 1
+        start = pos
+        while pos < n and not srcset[pos].isspace():
+            pos += 1
+        url = srcset[start:pos]
+        if url.endswith(","):
+            url = url.rstrip(",")       # no descriptor: the comma ends it
+        else:
+            while pos < n and srcset[pos] != ",":
+                pos += 1                # skip the descriptor
+        if url:
+            urls.append(url)
+    return urls
+
+
+class _PageStore:
+    """The pages captured for the PDF / mirror, spooled to a temporary folder
+    instead of held in memory - a big crawl used to keep every page's HTML in
+    RAM until the end. Iterates as (url, html) like the list it replaces."""
+
+    def __init__(self):
+        self._urls = []
+        self._dir = None
+
+    def append(self, item):
+        url, html = item
+        import tempfile
+        if self._dir is None:
+            self._dir = tempfile.mkdtemp(prefix="siteharvester-pages-")
+        path = os.path.join(self._dir, f"{len(self._urls)}.html")
+        with open(path, "w", encoding="utf-8", errors="replace") as fh:
+            fh.write(html)
+        self._urls.append(url)
+
+    def urls(self):
+        return list(self._urls)
+
+    def __len__(self):
+        return len(self._urls)
+
+    def __iter__(self):
+        for i, url in enumerate(self._urls):
+            html = ""
+            if self._dir:               # gone once close() has run
+                try:
+                    with open(os.path.join(self._dir, f"{i}.html"),
+                              encoding="utf-8", errors="replace") as fh:
+                        html = fh.read()
+                except OSError:
+                    pass
+            yield url, html
+
+    def close(self):
+        if self._dir:
+            shutil.rmtree(self._dir, ignore_errors=True)
+            self._dir = None
 
 
 def safe_filename(url):
@@ -832,9 +950,13 @@ class Harvester:
                  grab_other, out_dir, scope, make_pdf, use_ytdlp,
                  use_render, log_q, stop_event, tag="s1", site_label=None,
                  make_mirror=False, allow_any_media_host=False,
-                 abort_event=None):
+                 abort_event=None, site_folder=None,
+                 max_pages=DEFAULT_MAX_PAGES, max_file_bytes=MAX_FILE_BYTES):
         self.start_url = normalize_url(start_url)
         self.max_depth = max_depth
+        # 0 / None = no limit. See the safety limits near the top of the file.
+        self.max_pages = max_pages or 0
+        self.max_file_bytes = max_file_bytes or 0
         self.wanted = wanted_categories
         self.grab_other = grab_other
         self.scope = scope
@@ -892,14 +1014,16 @@ class Harvester:
         self.start_host = urlparse(self.start_url).hostname or host
         self.start_base = base_domain(host)
         self.site_name = safe_dirname(host)
-        # All files + the PDF live in a folder named after the site.
-        self.site_dir = os.path.join(out_dir, self.site_name)
+        # All files + the PDF live in a folder named after the site - or the
+        # name BatchRunner picked when two addresses in one batch share a
+        # host, so the second cannot overwrite the first one's PDF/mirror.
+        self.site_dir = os.path.join(out_dir, site_folder or self.site_name)
 
         self.videos_dir = os.path.join(self.site_dir, "Videos")
 
         self.counts = {}
         self.file_total = 0
-        self.pages = []          # (url, html) captured for the PDF
+        self.pages = _PageStore()   # (url, html) captured for the PDF/mirror
         self.redirected = {}     # address asked for -> where it really landed
         self.queue_size = 0
 
@@ -1020,6 +1144,7 @@ class Harvester:
             self.log(f"ERROR: {e}")
         finally:
             self._close_browser()
+            self.pages.close()
             self.status()
 
     # ---- crawling --------------------------------------------------------- #
@@ -1027,6 +1152,9 @@ class Harvester:
         q = deque()
         q.append((self.start_url, 0))
         queued = {self.start_url}
+        fetched = 0
+        variants = {}           # address without its ?query -> versions queued
+        capped_paths = set()    # reported once each
 
         while q:
             if self.stopping():
@@ -1036,7 +1164,13 @@ class Harvester:
             self.queue_size = len(q)
             if url in self.visited_pages:
                 continue
+            if self.max_pages and fetched >= self.max_pages:
+                self.log(f"Reached the limit of {self.max_pages} page(s) for "
+                         f"this site - {len(q) + 1} queued page(s) were not "
+                         "visited. Raise 'Max pages per site' to go further.")
+                return
             self.visited_pages.add(url)
+            fetched += 1
 
             depth_txt = "start" if depth == 0 else f"depth {depth}"
             self.log(f"→ Visiting [{depth_txt}]: {url}")
@@ -1048,6 +1182,21 @@ class Harvester:
                 for link in new_pages:
                     if link not in queued and link not in self.visited_pages:
                         if self._is_crawlable(link):
+                            # The same path with an endless run of different
+                            # queries (?month=1, ?month=2 ... or a session id)
+                            # is a crawler trap - take the first few only.
+                            if "?" in link:
+                                path_key = link.split("?", 1)[0]
+                                n = variants.get(path_key, 0)
+                                if n >= QUERY_VARIANT_CAP:
+                                    if path_key not in capped_paths:
+                                        capped_paths.add(path_key)
+                                        self.log(f"   (only the first {QUERY_VARIANT_CAP} "
+                                                 f"?query versions of {path_key} are "
+                                                 "crawled - it looks like a page "
+                                                 "that generates endless links)")
+                                    continue
+                                variants[path_key] = n + 1
                             queued.add(link)
                             q.append((link, depth + 1))
             self.queue_size = len(q)
@@ -1060,8 +1209,12 @@ class Harvester:
         ("img", "data-hi-res-src"), ("img", "data-flickity-lazyload"),
         ("source", "src"), ("video", "src"), ("video", "poster"),
         ("audio", "src"), ("embed", "src"), ("object", "data"),
-        ("link", "href"),
     ]
+    # <link href> is mostly not media (canonical, alternate-language pages,
+    # stylesheets, feeds); only these rels, or an href with a media
+    # extension (a preloaded hero image, say), count.
+    LINK_MEDIA_RELS = {"icon", "apple-touch-icon",
+                       "apple-touch-icon-precomposed", "image_src"}
 
     def _collect(self, base, soup, media, links):
         """Pull media URLs and page links out of one parsed document."""
@@ -1070,18 +1223,20 @@ class Harvester:
                 v = el.get(attr)
                 if v:
                     media.add(urljoin(base, v))
-        # srcset can hold several URLs.
+        for el in soup.find_all("link", href=True):
+            rel = el.get("rel") or []
+            rels = {r.lower() for r in (rel if isinstance(rel, list) else str(rel).split())}
+            href = urljoin(base, el["href"])
+            if rels & self.LINK_MEDIA_RELS or find_media_ext(href):
+                media.add(href)
+        # srcset can hold several URLs, relative ones included. Builders like
+        # Wix pack commas into the URL itself (…/fill/w_150,h_178,q_80,…),
+        # which srcset_urls() keeps in one piece.
         for el in soup.find_all(["img", "source"]):
             ss = el.get("srcset") or el.get("data-srcset")
             if ss:
-                for part in ss.split(","):
-                    u = part.strip().split(" ")[0]
-                    # Only take absolute URLs. Builders like Wix pack commas
-                    # into their sizing params (…/fill/w_150,h_178,q_80,…), and
-                    # splitting on "," yields junk fragments ("h_178", "q_80")
-                    # that would otherwise be fetched and 404.
-                    if u.startswith(("http://", "https://", "//")):
-                        media.add(urljoin(base, u))
+                for u in srcset_urls(ss):
+                    media.add(urljoin(base, u))
         # CSS background-image URLs (inline styles + <style> blocks).
         for el in soup.find_all(style=True):
             for u in re.findall(r'url\(([^)]+)\)', el["style"]):
@@ -1149,6 +1304,30 @@ class Harvester:
         self._browser = None
         self._pw = None
 
+    def _error_page(self, url, code):
+        """True (and logged) for an HTTP error response. A 404 or 500 page is
+        the site's error template, not content: it is not saved into the
+        PDF/mirror and its links are not followed."""
+        try:
+            code = int(code or 0)
+        except (TypeError, ValueError):
+            return False
+        if code < 400:
+            return False
+        self.log(f"   (skipped, HTTP {code} - not captured, links not followed)")
+        return True
+
+    def _read_html(self, resp):
+        """A streamed page's text, at most PAGE_READ_LIMIT bytes of it, or
+        None if an abort arrived while it was being read."""
+        data, truncated = read_page_body(resp, self.abort_event)
+        if data is None:
+            return None
+        if truncated:
+            self.log(f"   (page is over {PAGE_READ_LIMIT // 1048576} MB - only "
+                     "the first part was read)")
+        return decode_html(data, resp.headers)
+
     def _render_page(self, url, extra_media):
         """Load a page in the browser, run its JS, scroll for lazy content,
         capture media seen on the network, and return the rendered HTML.
@@ -1158,10 +1337,12 @@ class Harvester:
             try:
                 resp = self.session.get(url, timeout=20, stream=True)
                 try:
+                    if self._error_page(url, resp.status_code):
+                        return None
                     ctype = resp.headers.get("Content-Type", "").lower()
                     if "text/html" in ctype or "application/xhtml" in ctype:
                         self._final_url = resp.url or url
-                        return decode_html(resp.content, resp.headers)
+                        return self._read_html(resp)
                     # A file reached through a plain link - keep it, exactly
                     # as fast mode does, rather than dropping it.
                     self._save_fetched_file(url, resp)
@@ -1184,7 +1365,9 @@ class Harvester:
                     pass
 
             page.on("response", _on_response)
-            page.goto(url, wait_until="load", timeout=30000)
+            nav = page.goto(url, wait_until="load", timeout=30000)
+            if nav is not None and self._error_page(url, nav.status):
+                return None
 
             # Scroll to trigger lazy-loaded images / infinite content. A
             # graceful Stop lets the page in hand finish; only an abort cuts
@@ -1209,9 +1392,11 @@ class Harvester:
             try:
                 resp = self.session.get(url, timeout=20, stream=True)
                 try:
+                    if self._error_page(url, resp.status_code):
+                        return None
                     if "text/html" in resp.headers.get("Content-Type", "").lower():
                         self._final_url = resp.url or url
-                        return decode_html(resp.content, resp.headers)
+                        return self._read_html(resp)
                     # Chromium refuses to "navigate" to a download ("Download
                     # is starting"), so a file behind a plain link lands
                     # here - keep it, as fast mode does.
@@ -1244,6 +1429,8 @@ class Harvester:
                 self.log(f"   (skipped, error loading: {e})")
                 return set()
             try:
+                if self._error_page(url, resp.status_code):
+                    return set()
                 ctype = resp.headers.get("Content-Type", "").lower()
                 if "text/html" not in ctype and "application/xhtml" not in ctype:
                     # Not a web page — it may be a file reached via a plain
@@ -1253,7 +1440,9 @@ class Harvester:
                     self._save_fetched_file(url, resp)
                     return set()
                 self._final_url = resp.url or url
-                html = decode_html(resp.content, resp.headers)
+                html = self._read_html(resp)
+                if html is None:            # aborted part-way through
+                    return set()
             except Exception as e:
                 self.log(f"   (skipped, error loading: {e})")
                 return set()
@@ -1394,11 +1583,14 @@ class Harvester:
         if ext and not self.wants(ext):
             return
 
+        r = None
         try:
             r = self.session.get(url, stream=True, timeout=30)
             r.raise_for_status()
         except Exception as e:
             self.log(f"   ✗ failed: {url} — {e}")
+            if r is not None:
+                r.close()       # an error response still holds its connection
             return
 
         partial = None
@@ -1427,14 +1619,10 @@ class Harvester:
                 folder = os.path.join(self.site_dir, cat)
             os.makedirs(_fs(folder), exist_ok=True)
 
-            dest = os.path.join(folder, self._filename_for(url, ext))
-            b, x = os.path.splitext(dest)
-            i = 1
-            while os.path.exists(_fs(dest)):
-                dest = f"{b}_{i}{x}"
-                i += 1
-
-            partial = dest
+            if self._too_big(url, r):
+                return
+            partial = dest = _claim_unique(
+                os.path.join(folder, self._filename_for(url, ext)))
             if not self._stream_to(r, dest):
                 return
             partial = None
@@ -1457,6 +1645,7 @@ class Harvester:
         "still finishing" while a graceful Stop waits."""
         self._in_flight += 1
         self.status()
+        written = 0
         try:
             with open(_fs(dest), "wb") as f:
                 for chunk in resp.iter_content(chunk_size=65536):
@@ -1467,11 +1656,38 @@ class Harvester:
                                  f"{os.path.basename(dest)}")
                         return False
                     if chunk:
+                        written += len(chunk)
+                        if self.max_file_bytes and written > self.max_file_bytes:
+                            f.close()
+                            os.remove(_fs(dest))
+                            self.log(f"   ✗ skipped, larger than "
+                                     f"{self._size_txt(self.max_file_bytes)}: "
+                                     f"{os.path.basename(dest)}")
+                            return False
                         f.write(chunk)
             return True
         finally:
             self._in_flight -= 1
             self.status()
+
+    @staticmethod
+    def _size_txt(n):
+        return (f"{n / 1024 ** 3:.0f} GB" if n >= 1024 ** 3
+                else f"{n / 1048576:.0f} MB")
+
+    def _too_big(self, url, resp):
+        """True (and logged) when Content-Length already says the file is over
+        the per-file limit - saves fetching gigabytes only to throw them away.
+        _stream_to() enforces the same limit for responses that do not say."""
+        try:
+            size = int(resp.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if self.max_file_bytes and size > self.max_file_bytes:
+            self.log(f"   ✗ skipped, larger than {self._size_txt(self.max_file_bytes)}"
+                     f" ({self._size_txt(size)}): {url}")
+            return True
+        return False
 
     def _discard_partial(self, path):
         """A download that broke half-way must not be left looking complete."""
@@ -1517,13 +1733,9 @@ class Harvester:
                 name = cd_name[:180]
             else:
                 name = self._filename_for(url, ext)
-            dest = os.path.join(folder, name)
-            b, x = os.path.splitext(dest)
-            i = 1
-            while os.path.exists(_fs(dest)):
-                dest = f"{b}_{i}{x}"
-                i += 1
-            partial = dest
+            if self._too_big(url, resp):
+                return
+            partial = dest = _claim_unique(os.path.join(folder, name))
             if not self._stream_to(resp, dest):
                 return
             partial = None
@@ -2018,7 +2230,7 @@ class Harvester:
         self.log(f"Building combined PDF from {len(self.pages)} page(s)…")
 
         url_to_anchor = {}
-        for i, (url, _html) in enumerate(self.pages):
+        for i, url in enumerate(self.pages.urls()):
             url_to_anchor[url.split("#")[0]] = f"page-{i + 1}"
         self._add_redirect_aliases(url_to_anchor)
 
@@ -2120,7 +2332,7 @@ class Harvester:
         self.log(f"Building single-file offline mirror from {len(self.pages)} page(s)…")
 
         url_to_index = {}
-        for i, (u, _h) in enumerate(self.pages):
+        for i, u in enumerate(self.pages.urls()):
             url_to_index[u.split("#")[0]] = i
         self._add_redirect_aliases(url_to_index)
 
@@ -2360,6 +2572,29 @@ class BatchRunner:
         # (cut off in-flight downloads too) - see Harvester.__init__.
         self.stop_event = stop_event
         self.abort_event = abort_event if abort_event is not None else threading.Event()
+        self.folders = self._site_folders(sites)
+
+    @staticmethod
+    def _site_folders(sites):
+        """One output folder per batch entry. Normally that is the site's own
+        name; when two addresses share a host (example.com/blog and
+        example.com/shop) the later ones get the path added, then _2, _3 ...,
+        so their PDFs and mirrors never overwrite each other."""
+        folders, used = {}, set()
+        for tag, url, _label in sites:
+            p = urlparse(url)
+            name = safe_dirname(p.netloc)
+            if name.lower() in used:
+                slug = re.sub(r'[^A-Za-z0-9._-]+', "_", p.path.strip("/"))[:60]
+                if slug.strip("._"):
+                    name = safe_dirname(f"{p.netloc}_{slug}")
+                base, i = name, 2
+                while name.lower() in used:
+                    name = f"{base}_{i}"
+                    i += 1
+            used.add(name.lower())      # Windows and macOS ignore case
+            folders[tag] = name
+        return folders
 
     def _stopping(self):
         return self.stop_event.is_set() or self.abort_event.is_set()
@@ -2369,6 +2604,7 @@ class BatchRunner:
             self.log_q.put(("site_start", tag, {"url": url, "label": label}))
             harvester = Harvester(
                 start_url=url, tag=tag, site_label=label,
+                site_folder=self.folders.get(tag),
                 log_q=self.log_q, stop_event=self.stop_event,
                 abort_event=self.abort_event, **self.common)
             harvester.run()
@@ -2568,6 +2804,15 @@ class App(tk.Tk):
         self.concurrency_var = tk.StringVar(value=CONCURRENCY_OPTIONS[0])
         cb = ttk.Combobox(conc_col, textvariable=self.concurrency_var,
                           values=CONCURRENCY_OPTIONS, state="readonly", width=6)
+        cb.pack(anchor="w")
+        self._combos.append(cb)
+        pages_col = ttk.Frame(row)
+        pages_col.pack(side="left", padx=(12, 0))
+        ttk.Label(pages_col, text="Max pages per site").pack(anchor="w")
+        self.max_pages_var = tk.StringVar(value=str(DEFAULT_MAX_PAGES))
+        cb = ttk.Combobox(pages_col, textvariable=self.max_pages_var,
+                          values=list(MAX_PAGES_OPTIONS.keys()), state="readonly",
+                          width=9)
         cb.pack(anchor="w")
         self._combos.append(cb)
 
@@ -2861,6 +3106,8 @@ class App(tk.Tk):
             use_ytdlp=self.ytdlp_var.get(),
             use_render=self.render_var.get(),
             allow_any_media_host=self.any_media_host_var.get(),
+            max_pages=MAX_PAGES_OPTIONS.get(self.max_pages_var.get(),
+                                            DEFAULT_MAX_PAGES),
         )
 
         self.stop_event.clear()
