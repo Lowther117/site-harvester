@@ -9,8 +9,11 @@ rem permission is needed. After that it just opens.
 cd /d "%~dp0"
 
 if not exist ".venv-win\Scripts\python.exe" goto :setup
-if not exist "tools\ffmpeg" goto :setup
-goto :run
+rem ffmpeg counts as set up when it is in tools\ffmpeg OR on PATH - the same
+rem test setup.ps1 uses, so a PATH ffmpeg does not rerun setup every launch.
+if exist "tools\ffmpeg" goto :run
+where ffmpeg.exe >nul 2>&1 && goto :run
+goto :setup
 
 :setup
 echo.

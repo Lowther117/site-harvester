@@ -381,7 +381,10 @@ USER_AGENT = (
 
 
 def get_extension(url):
-    path = urlparse(url).path
+    try:
+        path = urlparse(url).path
+    except ValueError:      # "http://[" swept up from a page's raw HTML/JS
+        return ""
     name = unquote(os.path.basename(path))
     if "." in name:
         ext = name.rsplit(".", 1)[1].lower().strip()
@@ -2223,7 +2226,7 @@ class Harvester:
                     uri = action.get_object().get("/URI")
                     if uri is None:
                         continue
-                    key = str(uri).split("#")[0]
+                    key = normalize_url(str(uri))
                     if key in url_to_index:
                         target = writer.pages[url_to_index[key]].indirect_reference
                         obj[NameObject("/A")] = DictionaryObject({
@@ -2285,7 +2288,9 @@ class Harvester:
                     v = el.get(attr)
                     if not v:
                         continue
-                    absu = urljoin(url, v)
+                    absu = _join(url, v)
+                    if not absu:
+                        continue
                     if tag == "a":
                         target = normalize_url(absu)
                         el[attr] = "#" + url_to_anchor[target] if target in url_to_anchor else absu
@@ -2483,7 +2488,8 @@ class Harvester:
                 raw = m.group(1).strip().strip('\'"')
                 if not raw or raw.startswith("data:") or raw.startswith("#"):
                     return m.group(0)
-                d = data_uri(urljoin(base, raw))
+                u = _join(base, raw)
+                d = data_uri(u) if u else None
                 return "url(%s)" % d if d else m.group(0)
             return re.sub(r'url\(([^)]+)\)', repl, css)
 
@@ -2491,14 +2497,15 @@ class Harvester:
         # The page's own <base href> is removed below, so resolve against it.
         base_tag = soup.find("base", href=True)
         if base_tag:
-            url = urljoin(url, base_tag["href"].strip())
+            url = _join(url, base_tag["href"].strip()) or url
         for junk in soup(["script", "noscript", "base"]):
             junk.decompose()
 
         for img in soup.find_all("img"):
             src = img.get("src")
             if src and not src.startswith("data:"):
-                d = data_uri(urljoin(url, src))
+                u = _join(url, src)
+                d = data_uri(u) if u else None
                 if d:
                     img["src"] = d
             for attr in ("srcset", "data-src", "data-lazy-src", "data-srcset",
@@ -2510,7 +2517,8 @@ class Harvester:
             if s.has_attr("srcset"):
                 del s["srcset"]
             if s.get("src") and not s["src"].startswith("data:"):
-                d = data_uri(urljoin(url, s["src"]))
+                u = _join(url, s["src"])
+                d = data_uri(u) if u else None
                 if d:
                     s["src"] = d
 
@@ -2518,8 +2526,8 @@ class Harvester:
             rel = link.get("rel") or []
             relstr = " ".join(rel).lower() if isinstance(rel, list) else str(rel).lower()
             if "stylesheet" in relstr and link.get("href"):
-                css_url = urljoin(url, link["href"])
-                css = text_res(css_url)
+                css_url = _join(url, link["href"])
+                css = text_res(css_url) if css_url else None
                 if css is not None:
                     style = soup.new_tag("style")
                     style.string = inline_css(css, css_url)
@@ -2541,7 +2549,9 @@ class Harvester:
             el["style"] = inline_css(el["style"], url)
 
         for a in soup.find_all("a", href=True):
-            full = urljoin(url, a["href"])
+            full = _join(url, a["href"])
+            if not full:
+                continue
             absu = normalize_url(full)
             if absu in url_to_index:
                 a["href"] = "#"

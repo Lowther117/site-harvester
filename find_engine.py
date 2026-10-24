@@ -880,6 +880,7 @@ def ollama_pull(base, model, log=None, status=None, stop=None):
     except requests.RequestException as e:
         raise RuntimeError(f"the model download could not start ({type(e).__name__})")
     if r.status_code != 200:
+        r.close()
         raise RuntimeError(f"Ollama refused the model download (HTTP {r.status_code})")
     last = -1
     try:

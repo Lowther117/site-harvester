@@ -33,7 +33,16 @@ VENV=".venv-mac"
 if [ ! -x "$VENV/bin/python" ]; then
     say "Setting up (first run only) - this takes a few minutes"
     note "Creating the Python environment..."
-    python3 -m venv "$VENV"
+    # Not left to set -e: a failed venv (no ensurepip) can still leave
+    # $VENV/bin/python behind, which later launches would trust, and the
+    # window would close without saying why.
+    if ! python3 -m venv "$VENV"; then
+        rm -rf "$VENV"
+        say "The Python environment could not be created"
+        note "Nothing was left behind - fix the error above and open this again."
+        read -r -p "Press Return to close." _
+        exit 1
+    fi
     # "|| true": under set -e a failed upgrade (offline) would exit here and
     # leave a half-made environment that later launches never finish.
     "$VENV/bin/python" -m pip install --upgrade pip --quiet || true
