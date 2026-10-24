@@ -34,7 +34,9 @@ if [ ! -x "$VENV/bin/python" ]; then
     say "Setting up (first run only) - this takes a few minutes"
     note "Creating the Python environment..."
     python3 -m venv "$VENV"
-    "$VENV/bin/python" -m pip install --upgrade pip --quiet
+    # "|| true": under set -e a failed upgrade (offline) would exit here and
+    # leave a half-made environment that later launches never finish.
+    "$VENV/bin/python" -m pip install --upgrade pip --quiet || true
     note "Installing libraries (yt-dlp, Playwright and friends)..."
     if ! "$VENV/bin/python" -m pip install -r requirements.txt --quiet; then
         # A half-built environment would pass the check above next time and

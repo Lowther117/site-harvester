@@ -32,6 +32,7 @@ A source that fails twice running is left out for the rest of that search.
 import base64
 import csv
 import datetime
+import functools
 import json
 import os
 import random
@@ -164,6 +165,7 @@ _CAMEL_RE = re.compile(
     r"(?<=[a-z])(?=[A-Z])|(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])")
 
 
+@functools.lru_cache(maxsize=64)
 def norm(text):
     """Lower-case, with every run of punctuation turned into one space, and a
     space at each end so " word" and " word " can be tested with `in`."""
@@ -2139,8 +2141,11 @@ class FindEngine:
             # lock: several downloads run at once, and two files with the
             # same name would otherwise both be handed it.
             with self._name_lock:
-                dest = self._unique(os.path.join(folder, name))
-                fh = open(self.sh._fs(dest), "xb")
+                path = self._unique(os.path.join(folder, name))
+                fh = open(self.sh._fs(path), "xb")
+            # Only once the file is ours: a failed open must not let the
+            # clean-up below delete a file this download never created.
+            dest = path
             written = 0
             with fh:
                 for chunk in r.iter_content(65536):

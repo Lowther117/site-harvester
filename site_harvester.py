@@ -614,6 +614,15 @@ def srcset_urls(srcset):
     return urls
 
 
+def _join(base, url):
+    """urljoin(), or None for an address urllib refuses to parse - one
+    malformed href ("http://[bad/x") must not end the whole site's crawl."""
+    try:
+        return urljoin(base, url)
+    except ValueError:
+        return None
+
+
 class _PageStore:
     """The pages captured for the PDF / mirror, spooled to a temporary folder
     instead of held in memory - a big crawl used to keep every page's HTML in
@@ -1218,16 +1227,23 @@ class Harvester:
 
     def _collect(self, base, soup, media, links):
         """Pull media URLs and page links out of one parsed document."""
+        # One pass over the document per tag, not one per (tag, attribute).
+        attrs_by_tag = {}
         for tag, attr in self.MEDIA_ATTRS:
+            attrs_by_tag.setdefault(tag, []).append(attr)
+        for tag, attrs in attrs_by_tag.items():
             for el in soup.find_all(tag):
-                v = el.get(attr)
-                if v:
-                    media.add(urljoin(base, v))
+                for attr in attrs:
+                    v = el.get(attr)
+                    if v:
+                        u = _join(base, v)
+                        if u:
+                            media.add(u)
         for el in soup.find_all("link", href=True):
             rel = el.get("rel") or []
             rels = {r.lower() for r in (rel if isinstance(rel, list) else str(rel).split())}
-            href = urljoin(base, el["href"])
-            if rels & self.LINK_MEDIA_RELS or find_media_ext(href):
+            href = _join(base, el["href"])
+            if href and (rels & self.LINK_MEDIA_RELS or find_media_ext(href)):
                 media.add(href)
         # srcset can hold several URLs, relative ones included. Builders like
         # Wix pack commas into the URL itself (…/fill/w_150,h_178,q_80,…),
@@ -1236,20 +1252,28 @@ class Harvester:
             ss = el.get("srcset") or el.get("data-srcset")
             if ss:
                 for u in srcset_urls(ss):
-                    media.add(urljoin(base, u))
+                    u = _join(base, u)
+                    if u:
+                        media.add(u)
         # CSS background-image URLs (inline styles + <style> blocks).
         for el in soup.find_all(style=True):
             for u in re.findall(r'url\(([^)]+)\)', el["style"]):
-                media.add(urljoin(base, u.strip('\'" ')))
+                u = _join(base, u.strip('\'" '))
+                if u:
+                    media.add(u)
         for st in soup.find_all("style"):
             for u in re.findall(r'url\(([^)]+)\)', st.get_text() or ""):
-                media.add(urljoin(base, u.strip('\'" ')))
+                u = _join(base, u.strip('\'" '))
+                if u:
+                    media.add(u)
         # Anchors: a file link becomes media, otherwise a page to crawl. A
         # link whose extension is anything else (.json, .js, .key, .v2 ...)
         # stays a page candidate - the response then says whether it is a
         # page or a file (see _process_page / _is_crawlable).
         for a in soup.find_all("a", href=True):
-            absu = urljoin(base, a["href"])
+            absu = _join(base, a["href"])
+            if not absu:
+                continue
             if find_media_ext(absu):
                 media.add(absu)
             else:
@@ -1841,8 +1865,8 @@ class Harvester:
         for iframe in soup.find_all("iframe", src=True):
             if self.stopping():
                 return
-            src = urljoin(url, iframe["src"])
-            if any(h in src for h in VIDEO_EMBED_HOSTS):
+            src = _join(url, iframe["src"])
+            if src and any(h in src for h in VIDEO_EMBED_HOSTS):
                 self._grab_video(src)
         # HTML5 <video> or an og:video hint — hand the page itself to yt-dlp.
         og = soup.find("meta", attrs={"property": "og:video"})
@@ -2441,11 +2465,18 @@ class Harvester:
             return val
 
         def text_res(u):
+            # Stylesheets are shared by every page of a site: fetch each once
+            # per mirror (same shared cache, under a key no URL can collide with).
+            key = ("css", u)
+            if key in cache:
+                return cache[key]
             try:
                 r = req.get(u, timeout=20000)
-                return r.text() if r.ok else None
+                val = r.text() if r.ok else None
             except Exception:
-                return None
+                val = None
+            cache[key] = val
+            return val
 
         def inline_css(css, base):
             def repl(m):
