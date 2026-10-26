@@ -156,15 +156,30 @@ if errorlevel 1 (
 :ai_done
 
 rem The headless Chromium prints the pages for the clickable PDF, so it is
-rem not optional. PLAYWRIGHT_BROWSERS_PATH=0 makes Playwright save it INSIDE
-rem its own package, and --collect-all playwright below then carries it into
-rem the build - so the app works on a PC that has never seen Playwright. (The
-rem app sets the same variable on start-up when it finds the bundled copy.)
+rem not optional. It is downloaded to a short folder of its own and copied
+rem into the finished build AFTER PyInstaller has run (see "Adding the
+rem browser" below), the same way build-app.command does it on the Mac.
+rem Left inside the playwright package, its deepest files run past Windows'
+rem 260-character path limit and PyInstaller cannot read them ("Unable to
+rem find ... gdocs_script.js"). The app finds it in pw-browsers on start-up
+rem (_bundled_browsers() in site_harvester.py).
+rem --only-shell: the headless shell is the only browser the app starts.
 echo    Headless browser ^(Chromium^) - bundled in, about 200 MB...
-set "PLAYWRIGHT_BROWSERS_PATH=0"
-"%PY%" -m playwright install chromium >> "%LOG%" 2>&1
-if errorlevel 1 echo    WARNING: Chromium not downloaded - the PDF and "Render JavaScript" need it.
+set "PW_STAGE=%LOCALAPPDATA%\SiteHarvester\pw-browsers"
+if not defined LOCALAPPDATA set "PW_STAGE=%HERE%pw-browsers"
+set "PW_PKG=%VENV%\Lib\site-packages\playwright\driver\package\.local-browsers"
+rem A build environment from before this change has the browser inside the
+rem package, where --collect-all playwright would pick it up again. \\?\
+rem lets rd delete paths past 260 characters.
+if exist "%PW_PKG%" rd /s /q "\\?\%PW_PKG%" >> "%LOG%" 2>&1
+if not exist "%PW_STAGE%" mkdir "%PW_STAGE%"
+set "PLAYWRIGHT_BROWSERS_PATH=%PW_STAGE%"
+"%PY%" -m playwright install --only-shell chromium >> "%LOG%" 2>&1
+if errorlevel 1 "%PY%" -m playwright install chromium >> "%LOG%" 2>&1
 set "PLAYWRIGHT_BROWSERS_PATH="
+set "HAVE_BROWSER="
+for /d %%d in ("%PW_STAGE%\chromium*") do set "HAVE_BROWSER=1"
+if not defined HAVE_BROWSER echo    WARNING: Chromium not downloaded - the PDF and "Render JavaScript" need it.
 
 rem ffmpeg merges best-quality video and audio streams. imageio-ffmpeg is a
 rem static ffmpeg wrapped as an ordinary pip package, so it is baked in the
@@ -209,6 +224,19 @@ if not exist "%EXE%" (
     echo    The build finished but dist\Site Harvester\Site Harvester.exe is not there.
     goto :failed
 )
+
+rem ---------------------------------------------------------------------
+rem Adding the browser - with robocopy, which (unlike PyInstaller) copes
+rem with paths past 260 characters. It goes where the app looks for it:
+rem _internal\pw-browsers (PyInstaller 6), or beside the exe on older ones.
+rem ---------------------------------------------------------------------
+if not defined HAVE_BROWSER goto :browser_done
+echo    Adding the browser...
+set "PW_DEST=%HERE%dist\Site Harvester\_internal\pw-browsers"
+if not exist "%HERE%dist\Site Harvester\_internal" set "PW_DEST=%HERE%dist\Site Harvester\pw-browsers"
+robocopy "%PW_STAGE%" "%PW_DEST%" /E /NFL /NDL /NJH /NJS /NP /R:1 /W:1 >> "%LOG%" 2>&1
+if errorlevel 8 echo    WARNING: the browser could not be copied in - the PDF and "Render JavaScript" will not work.
+:browser_done
 
 rem ---------------------------------------------------------------------
 rem 4. Prove it runs before saying it works.

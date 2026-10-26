@@ -189,9 +189,11 @@ except ImportError:
 #   macOS    Site Harvester.app/Contents/Resources/pw-browsers - copied in by
 #            build-app.command AFTER PyInstaller has run, because PyInstaller
 #            re-signs every binary it collects and Chromium's do not survive it.
-#   Windows  inside the playwright package (driver/package/.local-browsers),
-#            where build-exe.bat downloads it with PLAYWRIGHT_BROWSERS_PATH=0
-#            and --collect-all playwright carries it along.
+#   Windows  Site Harvester/_internal/pw-browsers - copied in by build-exe.bat
+#            after PyInstaller, with robocopy: Chromium's deepest files run
+#            past the 260-character path limit PyInstaller is held to.
+#   (A from-source run can also have it inside the playwright package,
+#   driver/package/.local-browsers, if installed with PLAYWRIGHT_BROWSERS_PATH=0.)
 #
 # Playwright only looks in either when PLAYWRIGHT_BROWSERS_PATH says so, so it
 # is set here whenever a bundled browser is actually present. Otherwise the
