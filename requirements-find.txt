@@ -6,4 +6,5 @@
 # in which case the Find tab falls back to its slower built-in search.
 #
 # By hand:   pip install -r requirements-find.txt
-ddgs>=9.0
+# Ceiling at the next major: a new ddgs major is opted into after a test build.
+ddgs>=9.0,<10

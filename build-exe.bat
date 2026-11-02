@@ -41,7 +41,7 @@ if not exist "%PY%" (
 :haveenv
 echo    Installing PyInstaller...
 "%PY%" -m pip install --upgrade pip --quiet >> "%LOG%" 2>&1
-"%PY%" -m pip install --upgrade --only-binary :all: pyinstaller >> "%LOG%" 2>&1
+"%PY%" -m pip install --upgrade --only-binary :all: "pyinstaller>=6.11,<7" >> "%LOG%" 2>&1
 if errorlevel 1 (
     echo    ERROR: could not install PyInstaller.
     goto :failed
@@ -186,7 +186,7 @@ rem static ffmpeg wrapped as an ordinary pip package, so it is baked in the
 rem same way as everything else; the app finds it through imageio_ffmpeg.
 echo    ffmpeg - bundled in...
 set "FFMPEG_FLAG="
-"%PY%" -m pip install --only-binary :all: imageio-ffmpeg >> "%LOG%" 2>&1
+"%PY%" -m pip install --only-binary :all: "imageio-ffmpeg>=0.5,<1" >> "%LOG%" 2>&1
 "%PY%" -c "import imageio_ffmpeg" >nul 2>&1
 if not errorlevel 1 set "FFMPEG_FLAG=--collect-all imageio_ffmpeg"
 if not defined FFMPEG_FLAG echo    ...not available, the app will look for ffmpeg on the PC it runs on.

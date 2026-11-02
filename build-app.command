@@ -144,7 +144,7 @@ else
     fi
 fi
 "$PY" -m pip install --upgrade pip --quiet
-"$PY" -m pip install --upgrade --only-binary :all: pyinstaller \
+"$PY" -m pip install --upgrade --only-binary :all: "pyinstaller>=6.11,<7" \
     || fail "could not install PyInstaller"
 
 # --only-binary :all: everywhere: a missing wheel then fails in seconds
@@ -316,7 +316,7 @@ fi
 # the same way as everything else; the app finds it through imageio_ffmpeg.
 say "ffmpeg - bundled into the app"
 FFMPEG_FLAG=""
-if "$PY" -m pip install --only-binary :all: imageio-ffmpeg \
+if "$PY" -m pip install --only-binary :all: "imageio-ffmpeg>=0.5,<1" \
         && "$PY" -c 'import imageio_ffmpeg' >/dev/null 2>&1; then
     FFMPEG_FLAG="--collect-all imageio_ffmpeg"
     echo "   $("$PY" -c 'import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())')"
