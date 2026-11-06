@@ -83,10 +83,10 @@ from tkinter import ttk, filedialog, messagebox
 import theme
 
 # --------------------------------------------------------------------------- #
-# Appearance: the house themes - Phosphor purple, Dark and Light.
+# Appearance: the house themes - Phosphor glass, Phosphor purple, Dark and Light.
 #
-# Phosphor purple (Winnow's look) is the default. The View menu picks one and
-# Ctrl+D cycles Phosphor -> Dark -> Light at runtime; the choice is remembered in a small file next to the app. The palettes and the
+# Phosphor glass (the website's look) is the default. The View menu picks one and
+# Ctrl+D cycles Glass -> Phosphor -> Dark -> Light at runtime; the choice is remembered in a small file next to the app. The palettes and the
 # ttk styling live in theme.py, shared with the other desktop apps.
 # --------------------------------------------------------------------------- #
 
