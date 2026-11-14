@@ -965,8 +965,13 @@ class Harvester:
                  use_render, log_q, stop_event, tag="s1", site_label=None,
                  make_mirror=False, allow_any_media_host=False,
                  abort_event=None, site_folder=None,
-                 max_pages=DEFAULT_MAX_PAGES, max_file_bytes=MAX_FILE_BYTES):
+                 max_pages=DEFAULT_MAX_PAGES, max_file_bytes=MAX_FILE_BYTES,
+                 only_exts=None):
         self.start_url = normalize_url(start_url)
+        # "PDF files only": when set, a file is kept only if its extension is
+        # in this set, whatever the category tickboxes say. Pages are still
+        # crawled as normal - they are how the files get found.
+        self.only_exts = {e.lower() for e in only_exts} if only_exts else None
         self.max_depth = max_depth
         # 0 / None = no limit. See the safety limits near the top of the file.
         self.max_pages = max_pages or 0
@@ -1072,6 +1077,8 @@ class Harvester:
         return self.stop_event.is_set() or self.abort_event.is_set()
 
     def wants(self, ext):
+        if self.only_exts is not None:
+            return ext in self.only_exts
         cat = category_for_ext(ext)
         if cat is None:
             return False
@@ -1546,6 +1553,12 @@ class Harvester:
             if self.stopping():
                 return set()
             ext = find_media_ext(u)
+            # "PDF files only": an image/CDN URL with no extension would cost
+            # a request each just to learn it is not a PDF. A PDF behind an
+            # extensionless link is an <a href>, which the crawl itself
+            # fetches and saves (see _save_fetched_file).
+            if self.only_exts is not None and ext not in self.only_exts:
+                continue
             if self.use_ytdlp and (ext in VIDEO_EXTS):
                 if ext in STREAM_EXTS:
                     if page_ok:
@@ -1634,6 +1647,8 @@ class Harvester:
                 ext = ext_from_response(r.headers) or find_media_ext(url) or get_extension(url)
                 if not ext:
                     return
+            if self.only_exts is not None and ext not in self.only_exts:
+                return
 
             cat = category_for_ext(ext)
             if cat is None:
@@ -1737,6 +1752,8 @@ class Harvester:
         # Prefer a real extension from the URL, then the response headers.
         ext = find_media_ext(url) or ext_from_response(resp.headers) or get_extension(url)
         if not ext:
+            return
+        if self.only_exts is not None and ext not in self.only_exts:
             return
         cat = category_for_ext(ext)
         if cat is None:
@@ -2867,30 +2884,49 @@ class App(tk.Tk):
         self._combos.append(cb)
 
         ttk.Label(main, text="File types to collect").pack(anchor="w", **pad)
+        # "PDF files only" overrides everything in this block: the whole site
+        # is walked and nothing but its .pdf files is saved. The widgets it
+        # overrides are greyed out while it is ticked (see _pdf_only_changed).
+        self.pdf_only_var = tk.BooleanVar(
+            value=bool(_load_ui_settings().get("pdf_only", False)))
+        ttk.Checkbutton(main,
+                        text="PDF files only — walk the entire site and download nothing but its PDFs",
+                        variable=self.pdf_only_var,
+                        command=self._pdf_only_changed).pack(anchor="w", padx=12, pady=(0, 4))
+        self._pdf_only_overrides = []
         types_frame = ttk.Frame(main)
         types_frame.pack(fill="x", padx=12)
         self.cat_vars = {}
         for i, cat in enumerate(CATEGORIES.keys()):
             v = tk.BooleanVar(value=True)
             self.cat_vars[cat] = v
-            ttk.Checkbutton(types_frame, text=cat, variable=v).grid(
-                row=0, column=i, sticky="w", padx=(0, 14))
+            w = ttk.Checkbutton(types_frame, text=cat, variable=v)
+            w.grid(row=0, column=i, sticky="w", padx=(0, 14))
+            self._pdf_only_overrides.append(w)
         self.other_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(main,
-                        text="Also grab any other file type (sorted into Other/ by extension)",
-                        variable=self.other_var).pack(anchor="w", padx=12, pady=(4, 0))
+        w = ttk.Checkbutton(main,
+                            text="Also grab any other file type (sorted into Other/ by extension)",
+                            variable=self.other_var)
+        w.pack(anchor="w", padx=12, pady=(4, 0))
+        self._pdf_only_overrides.append(w)
         self.pdf_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(main,
-                        text="Also save one clickable PDF of every page visited",
-                        variable=self.pdf_var).pack(anchor="w", padx=12, pady=(2, 0))
+        w = ttk.Checkbutton(main,
+                            text="Also save one clickable PDF of every page visited",
+                            variable=self.pdf_var)
+        w.pack(anchor="w", padx=12, pady=(2, 0))
+        self._pdf_only_overrides.append(w)
         self.mirror_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(main,
-                        text="Also save a single-file offline mirror (one .html you can browse offline)",
-                        variable=self.mirror_var).pack(anchor="w", padx=12, pady=(2, 0))
+        w = ttk.Checkbutton(main,
+                            text="Also save a single-file offline mirror (one .html you can browse offline)",
+                            variable=self.mirror_var)
+        w.pack(anchor="w", padx=12, pady=(2, 0))
+        self._pdf_only_overrides.append(w)
         self.ytdlp_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(main,
-                        text="Use yt-dlp for embedded & streaming videos at best quality (needs ffmpeg)",
-                        variable=self.ytdlp_var).pack(anchor="w", padx=12, pady=(2, 0))
+        w = ttk.Checkbutton(main,
+                            text="Use yt-dlp for embedded & streaming videos at best quality (needs ffmpeg)",
+                            variable=self.ytdlp_var)
+        w.pack(anchor="w", padx=12, pady=(2, 0))
+        self._pdf_only_overrides.append(w)
         self.render_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(main,
                         text="Render JavaScript first — slower, but catches sites that load content dynamically",
@@ -2902,6 +2938,9 @@ class App(tk.Tk):
         ttk.Checkbutton(main,
                         text="Allow media from any host (otherwise only this site's own hosts and known media CDNs)",
                         variable=self.any_media_host_var).pack(anchor="w", padx=12, pady=(2, 0))
+
+        if self.pdf_only_var.get():      # remembered from the last launch
+            self._pdf_only_changed(save=False)
 
         ttk.Label(main, text="Save to folder").pack(anchor="w", **pad)
         out_frame = ttk.Frame(main)
@@ -3089,6 +3128,32 @@ class App(tk.Tk):
             pass
         self.after(100, self._drain_log)
 
+    def _pdf_only_changed(self, save=True):
+        """Tick: switch to "Entire site" + "No limit" pages and grey out the
+        options the mode overrides. Untick: put depth / page limit back to
+        what they were and re-enable the rest. Depth and the page limit stay
+        editable either way, for a site too big to walk in full."""
+        on = self.pdf_only_var.get()
+        if on:
+            self._pdf_only_prev = (self.depth_var.get(), self.max_pages_var.get())
+            self.depth_var.set(next(k for k, v in DEPTH_OPTIONS.items() if v == -1))
+            self.max_pages_var.set(next(k for k, v in MAX_PAGES_OPTIONS.items() if v == 0))
+        else:
+            prev = getattr(self, "_pdf_only_prev", None)
+            if prev:
+                self.depth_var.set(prev[0])
+                self.max_pages_var.set(prev[1])
+            self._pdf_only_prev = None
+        for w in self._pdf_only_overrides:
+            w.state(["disabled"] if on else ["!disabled"])
+        if save:
+            try:
+                data = _load_ui_settings()
+                data["pdf_only"] = bool(on)
+                _save_ui_settings(data)
+            except Exception:
+                pass
+
     def _start(self):
         urls = self._parse_urls()
         if not urls:
@@ -3096,7 +3161,10 @@ class App(tk.Tk):
                                    "Please enter at least one website address.")
             return
 
+        pdf_only = self.pdf_only_var.get()
         wanted = {c for c, v in self.cat_vars.items() if v.get()}
+        if pdf_only:
+            wanted = {"Documents"}      # where the PDFs are filed
         if not wanted and not self.other_var.get():
             messagebox.showwarning("Site Harvester", "Please select at least one file type.")
             return
@@ -3127,6 +3195,9 @@ class App(tk.Tk):
         max_depth = DEPTH_OPTIONS[self.depth_var.get()]
         scope = SCOPE_OPTIONS[self.scope_var.get()]
 
+        if pdf_only:
+            self._append_log("PDF files only: crawling pages to find links, "
+                             "saving nothing but .pdf files (into Documents/).")
         if len(urls) > 1:
             self._append_log(f"Queued {len(urls)} site(s); running {concurrency} at a time.")
         if concurrency > 1 and self.render_var.get():
@@ -3141,12 +3212,13 @@ class App(tk.Tk):
         common = dict(
             max_depth=max_depth,
             wanted_categories=wanted,
-            grab_other=self.other_var.get(),
+            grab_other=self.other_var.get() and not pdf_only,
             out_dir=out_dir,
             scope=scope,
-            make_pdf=self.pdf_var.get(),
-            make_mirror=self.mirror_var.get(),
-            use_ytdlp=self.ytdlp_var.get(),
+            make_pdf=self.pdf_var.get() and not pdf_only,
+            make_mirror=self.mirror_var.get() and not pdf_only,
+            use_ytdlp=self.ytdlp_var.get() and not pdf_only,
+            only_exts={"pdf"} if pdf_only else None,
             use_render=self.render_var.get(),
             allow_any_media_host=self.any_media_host_var.get(),
             max_pages=MAX_PAGES_OPTIONS.get(self.max_pages_var.get(),

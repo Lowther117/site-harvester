@@ -173,6 +173,13 @@ The Harvest tab is one column of controls, top to bottom:
      (can grow large fast — best paired with a shallow depth)
 5. **File types to collect** — tick Images, Videos, Documents, Audio, Archives
    as wanted (all on by default).
+   - **PDF files only** — walks the entire site and downloads nothing but its
+     `.pdf` files (into `Documents/`). Ticking it sets the depth to *Entire
+     site* and the page limit to *No limit* (both can still be lowered for a
+     huge site) and greys out the type tickboxes, the combined PDF, the
+     offline mirror and yt-dlp, none of which apply. PDFs behind links with
+     no `.pdf` in the address (`/download?id=…`) are still caught. The choice
+     is remembered between launches.
 6. **Also grab any other file type** — catches anything with an extension the
    five groups don't cover, sorted into `Other/<extension>/`. On by default.
 7. **Also save one clickable PDF of every page visited** — one navigable PDF
